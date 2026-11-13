@@ -101,6 +101,19 @@ An unknown impact is valid and has no numerical forecast. Do not invent numbers
 to satisfy the workflow. A small full-task contrast can be cheaper than profiling;
 choose diagnostic work only when it resolves a concrete uncertainty.
 
+For any alternative whose impact remains unknown, replace its entire `impact`
+object with the following shape. Both `reason` and `next_check` are required;
+`next_check` describes what would resolve the uncertainty, without requiring a
+probe to run before a different alternative can be selected.
+
+```json
+{
+  "kind": "unknown",
+  "reason": "<why the available evidence cannot support a defensible range>",
+  "next_check": "<the specific evidence or check that could change the choice>"
+}
+```
+
 Use `action: "probe"` when a diagnostic is the best next action. The CLI returns
 `run_selected_probe_then_revise_decision` and refuses a candidate round until a
 replacement implementation decision is submitted. Run the probe through the
@@ -157,7 +170,7 @@ claim. Feedback never changes the evaluator or candidate promotion rules.
 | --- | --- | --- |
 | Start | Freeze task, quality/performance protocol and budget | Same, plus freeze policy and return choice guidance/template |
 | Next experiment | Agent edits and supplies a hypothesis | Agent compares alternatives, impact/evidence/cost/risk and submits `propose` before editing |
-| Uncertainty | Agent decides whether to investigate | Explicit `probe` can pause implementation until a revised choice; no forced profiling |
+| Uncertainty | Agent decides whether to investigate | Explicit `probe` can pause implementation until a revised choice; refresh profiling when relevant, not every round |
 | Round | Retain and evaluate submitted candidate | Also reject missing, stale or altered decisions and bind the choice to the attempt |
 | Feedback | Assessment and incumbent | Same, plus chosen forecast, measured outcome and comparison limitations |
 | Final | Independently retest the selected code | Unchanged; predictions cannot qualify a candidate |

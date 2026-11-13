@@ -26,7 +26,8 @@ def guidance():
         "to use unknown. Do not sum overlapping kernel times as an end-to-end time fraction.",
         "Choose one experiment yourself; neither retrieval rank nor the largest guessed number "
         "determines the choice. Use unknown only when no defensible range can be given, explaining "
-        "the missing evidence. A demo is optional: probe if its result could change the choice "
+        "the missing evidence in impact.reason and the next discriminating check in "
+        "impact.next_check. A demo is optional: probe if its result could change the choice "
         "and its total cost is worthwhile; otherwise directly implement and evaluate.",
         "Select action=implement before editing; explain the tradeoff and preserve viable "
         "alternatives. Allow bounded exploration rather than only predictable small changes.",
@@ -115,8 +116,8 @@ def forecast(impact):
     if not isinstance(impact, dict):
         raise ValueError("Impact must be an object")
     if impact.get("kind") == "unknown":
-        _text(impact.get("reason"), "unknown impact reason")
-        _text(impact.get("next_check"), "next discriminating check")
+        _text(impact.get("reason"), "impact.reason for unknown impact")
+        _text(impact.get("next_check"), "impact.next_check (next discriminating check)")
         return {"kind": "unknown", "speedup_range": None}
     if impact.get("kind") == "agent_estimate":
         bounds = _range(impact.get("objective_ratio_range"), "objective_ratio_range", positive=True)
