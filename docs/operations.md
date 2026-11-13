@@ -27,6 +27,7 @@ Effect classes used below:
 
 | Intent | Entry | Effect class | Boundary |
 | --- | --- | --- | --- |
+| Record the next optimization decision | CLI `campaign propose` / `benchmarks session propose` | Local evidence-writing | Retains alternatives and caller-supplied impact/cost assumptions against the current candidate; required before round only under the frozen `recorded` policy. No execution or acceptance from forecasts. See [contract](optimization-decisions.md) |
 | Complete a task optimization in the current Agent | CLI `benchmarks session start/knowledge/round/status/final/recover` | Experiment-executing / local records | Frozen budget, actual candidates and independent task outcomes. The current Agent drives edits. Real usage is imported explicitly. Recovery collects an existing execution |
 | Optimize an ordinary project in the current Agent | CLI `campaign start/knowledge/round/status/final/recover` | Experiment-executing / local records | Harness freezes explicit caller-provided checks, manages multi-file candidates, executes and assesses retained results. This path does not depend on Benchmark or infer acceptance from the goal. See [shared workflow](optimization-workflow-unification.md) |
 | Prepare and record a fresh native Agent | CLI `agents prepare/dispatch/bind/record/status` | Local records / explicit host handoff | The initiating Agent calls native host tools. Records prevent repeated dispatch; exported host observations do not establish task acceptance. See [native sessions](native-agent-sessions.md) |

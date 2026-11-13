@@ -30,6 +30,12 @@
 
 先准备任务条件，再调用 start。start 内复制任务、脚本和基线并写入计划/状态，不执行测量。Agent 逐次调用 round，最后调用 final 独立重测已保存的最佳版本。
 
+新实验可以在 start 时选择 `--decision-policy recorded`：每轮先通过 `propose`
+留存候选方向、预期整任务收益或未知原因、依据、成本和选择理由，再提交 round。
+Harness 检查记录对应当前版本并将其与实际结果关联；它不证明预估正确，也不根据
+预估判定通过。知识关闭时同样可以使用，默认 `agent` 模式保留原流程。
+字段和边界见 [决策记录](optimization-decisions.md)。
+
 ```mermaid
 sequenceDiagram
     actor U as 用户
@@ -66,6 +72,11 @@ sequenceDiagram
                 H-->>C: 返回留存引用与正文
                 C-->>A: 返回可阅读的资料，供本轮分析使用
             end
+            opt start 选择 recorded 决策策略
+                A->>C: campaign propose：提交方案对比、收益依据、成本和选择理由
+                C->>H: register_decision：核对当前最佳源码身份，检查条件估算输入
+                H-->>A: decisions/…json 与哈希；条件收益范围或 unknown
+            end
             A->>A: 提出假设，修改声明范围内代码，形成候选
             A->>C: campaign round：提交候选路径、假设和可用用量
         else 搜索结束：独立复测
@@ -75,6 +86,7 @@ sequenceDiagram
         C->>H: session_command：提交 round/final 参数
         H->>H: evaluate_round：使用内部 execute / assess 适配函数
         H->>H: 核验文件、状态和预算，选择提交候选或留存最佳版本
+        Note over H: recorded 模式的 round 还要求有效决策记录；预测不替代任何验收步骤
         H->>H: 保存到 rounds/… 或 final/…；state.pending 记录本次待完成尝试
         H->>H: _session_execute → _project_execute → project.steps
         Note over H: 根据固定配置生成基线/候选的质量、预热、交替测量命令

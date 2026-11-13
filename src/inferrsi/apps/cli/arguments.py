@@ -80,12 +80,16 @@ def _optimization_actions(stages, *, project=False):
     start.add_argument("--condition", default="current-agent" if project else None,
                        required=not project)
     start.add_argument("--knowledge", choices=("on", "off"), default="on")
+    start.add_argument("--decision-policy", choices=("agent", "recorded"), default="agent",
+                       help="Require a retained proposal before each round when recorded")
     start.add_argument("--evaluation-prefix", default="", help="Quoted allocator argv prefix")
     start.add_argument("--python", default=sys.executable)
-    for name in ("status", "round", "final", "recover", "knowledge"):
+    for name in ("status", "round", "final", "recover", "knowledge", "propose"):
         stage = stages.add_parser(name)
         stage.set_defaults(session_action=name)
         stage.add_argument("--session", "--directory", dest="session", type=Path, required=True)
+        if name == "propose":
+            stage.add_argument("--input", type=Path, required=True, help="Experiment decision JSON")
         if name == "round":
             stage.add_argument("--candidate", type=Path, required=True)
             stage.add_argument("--hypothesis", required=True)

@@ -115,7 +115,7 @@ def _runtime_identity():
              "infra/processes.py", "infra/artifacts.py", "harness/scenarios/external.py",
              "harness/atomic_json.py",
              "harness/usage.py", "harness/agent_sessions.py", "harness/task_protocol.py",
-             "harness/candidates.py", "harness/project.py",
+             "harness/candidates.py", "harness/project.py", "harness/experiment_decisions.py",
              "harness/records/knowledge_capture.py", "apps/campaign.py",
              "knowledge/context_projection.py")
     return {name: sha256(root / name) for name in names}
@@ -183,6 +183,7 @@ def session_command(args, *, task_source: Path | None = None, knowledge_reader=N
                 "round_limit": args.rounds, "max_seconds": args.max_minutes * 60,
                 "round_mode": args.round_mode, "final_reserve_seconds": reserve,
                 "knowledge_allowed": args.knowledge == "on",
+                "decision_policy": getattr(args, "decision_policy", "agent"),
                 "evaluation_timeout_seconds": args.evaluation_timeout_seconds,
                 "evaluation_prefix": evaluation_prefix, "python": args.python,
                 "runtime_identity": _runtime_identity(), **candidate, **settings}
@@ -196,6 +197,17 @@ def session_command(args, *, task_source: Path | None = None, knowledge_reader=N
             f"Follow the frozen round policy, then run {operation} final to retest independently. "
             "Report summary.json and its curve. Import actual usage exports when available."
         )
+        if plan["decision_policy"] == "recorded":
+            from inferrsi.harness.experiment_decisions import guidance
+
+            result["decision_guidance"] = guidance()
+            result["instructions"] += (
+                f" Before editing each candidate, use {operation} propose --input <decision.json>: "
+                "retain alternatives, evidence, whole-task impact or unknowns, cost, risks and "
+                "choice rationale against best.sha256. Predictions never replace measurement. "
+                "Fill the returned decision_template; repository users can also read "
+                "docs/optimization-decisions.md for conditional impact ranges."
+            )
         return result
     import json
 
@@ -204,6 +216,8 @@ def session_command(args, *, task_source: Path | None = None, knowledge_reader=N
         raise ValueError("Optimization runtime changed, use its frozen runtime to resume")
     if args.session_action == "status":
         return optimization.status(root)
+    if args.session_action == "propose":
+        return optimization.register_decision(root, args.input)
     if args.session_action == "knowledge":
         if knowledge_reader is None or retain_context is None:
             raise ValueError("A knowledge reader and capture callback are required")

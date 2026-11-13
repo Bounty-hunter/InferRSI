@@ -69,6 +69,31 @@ def submit(project, capsys, metric):
     return code, json.loads(capsys.readouterr().out)
 
 
+def test_project_decision_gate_works_without_knowledge(project, capsys, tmp_path):
+    view = start(project, capsys, extra=("--decision-policy", "recorded", "--knowledge", "off"))
+    root = project[-1]
+    with pytest.raises(SystemExit):
+        submit(project, capsys, 20)
+    capsys.readouterr()
+    proposal = {"schema_version": 1, "based_on_sha256": view["best"]["sha256"],
+        "alternatives": [{"id": "config", "change": "Synthetic configuration",
+            "mechanism": "Change declared config while preserving compute",
+            "evidence": ["Frozen fixture protocol"], "cost": "One quality/performance round",
+            "risk": "Configuration must not alter output", "impact": {
+                "kind": "unknown", "reason": "Synthetic metrics cannot forecast real throughput",
+                "next_check": "Use existing project adapter"}}],
+        "selected": "config", "rationale": "Verify shared controller with multifile candidate"}
+    source = tmp_path / "decision.json"
+    source.write_text(json.dumps(proposal), encoding="utf-8")
+    assert main(["campaign", "propose", "--session", str(root), "--input", str(source)]) == 0
+    receipt = json.loads(capsys.readouterr().out)["reference"]
+    code, result = submit(project, capsys, 20)
+    assert code == 0 and result["latest_observation"]["decision"] == receipt
+    assert main(["campaign", "final", "--session", str(root), "--reason", "Control complete"]) == 0
+    capsys.readouterr()
+    assert read_records(root)[1]["final"]["assessment"]["verdict"] == "PASS"
+
+
 def test_project_lifecycle_never_imports_benchmark(project):
     """Reject any Benchmark import in a fresh process, including the CLI entry."""
     repo, _, _, root = project

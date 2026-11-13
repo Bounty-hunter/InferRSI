@@ -28,6 +28,8 @@ def initialize(root: Path, plan: dict) -> dict:
         raise ValueError("Unknown round policy")
     if plan["selection"]["direction"] not in ("minimize", "maximize"):
         raise ValueError("Unknown selection direction")
+    if plan.get("decision_policy", "agent") not in ("agent", "recorded"):
+        raise ValueError("Unknown decision policy")
     reserve = plan["final_reserve_seconds"]
     if type(reserve) not in (int, float) or not 0 < reserve < plan["max_seconds"]:
         raise ValueError("Final reserve must fit within the total time budget")
@@ -37,7 +39,7 @@ def initialize(root: Path, plan: dict) -> dict:
     state = {
         "schema_version": 1, "plan_digest": digest(plan), "started_at": started,
         "deadline": started + plan["max_seconds"], "state": "active", "rounds": [],
-        "contexts": [], "pending": None, "final": None,
+        "contexts": [], "decisions": [], "pending_decision": None, "pending": None, "final": None,
         "best": {"path": plan["baseline_path"],
                  "sha256": plan["baseline_sha256"],
                  "score": plan["selection"]["initial_score"], "kind": "baseline"},
@@ -77,7 +79,15 @@ def _load(root):
     for context in state["contexts"]:
         if sha256(root / context["path"]) != context["sha256"]:
             raise ValueError("Delivered knowledge context changed")
+    decisions = state.get("decisions", [])
+    for reference in decisions:
+        if sha256(root / reference["path"]) != reference["sha256"]:
+            raise ValueError("Retained experiment decision changed")
+    if state.get("pending_decision") and state["pending_decision"] not in decisions:
+        raise ValueError("Pending decision is not a retained receipt")
     for record in [*state["rounds"], *([state["final"]] if state["final"] else [])]:
+        if record.get("decision") and record["decision"] not in decisions:
+            raise ValueError("Round decision is not a retained receipt")
         directory = root / record["path"]
         if sha256(directory / "observation.json") != record["observation_sha256"]:
             raise ValueError("Retained assessment record changed")
@@ -104,6 +114,12 @@ def status(root: Path) -> dict:
                 "integrity_error": control["integrity_error"], "summary": None}
     plan, state = _load(root)
     next_action = "edit_candidate_and_submit_round"
+    if plan.get("decision_policy") == "recorded" and not state.get("pending_decision"):
+        next_action = "submit_experiment_decision_before_editing"
+    if state.get("pending_decision"):
+        receipt = json.loads((root / state["pending_decision"]["path"]).read_text(encoding="utf-8"))
+        if receipt["assessment"].get("action") == "probe":
+            next_action = "run_selected_probe_then_revise_decision"
     if len(state["rounds"]) == plan["round_limit"]:
         next_action = "independently_retest_selected_candidate_with_final"
     search_remaining = state["deadline"] - time.time() - plan["final_reserve_seconds"]
@@ -117,6 +133,11 @@ def status(root: Path) -> dict:
         next_action = "recover_existing_attempt_without_relaunch"
     if state["state"] in ("completed", "blocked"):
         next_action = state["state"]
+    decision_template = None
+    if next_action == "submit_experiment_decision_before_editing":
+        from .experiment_decisions import template
+
+        decision_template = template(state["best"]["sha256"])
     return {
         "session": str(root), "state": state["state"], "next_action": next_action,
         "completed_rounds": len(state["rounds"]), "round_limit": plan["round_limit"],
@@ -130,6 +151,8 @@ def status(root: Path) -> dict:
         "task_instructions": str(root / "frozen/TASK.md"),
         "working_candidate": str(root / plan["working_candidate"]),
         "best": state["best"], "pending": state["pending"],
+        "pending_decision": state.get("pending_decision"),
+        "decision_template": decision_template,
         "latest_observation": state["rounds"][-1] if state["rounds"] else None,
         "summary": str(root / "summary.json") if state["final"] is not None else None,
     }
@@ -172,6 +195,32 @@ def _usage_record(source):
             raw)
 
 
+def register_decision(root: Path, source: Path) -> dict:
+    from .experiment_decisions import assess
+
+    with _locked(root):
+        plan, state = _load(root)
+        _active(state, reserve=plan["final_reserve_seconds"])
+        if len(state["rounds"]) >= plan["round_limit"]:
+            raise ValueError("Round budget consumed; finalize without new proposals")
+        if source.stat().st_size > 65536:
+            raise ValueError("Decision must fit in 64 KiB")
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        assessment = assess(payload, basis_sha256=state["best"]["sha256"])
+        record = {"schema_version": 1, "proposal": payload, "assessment": assessment,
+                  "round": len(state["rounds"]) + 1, "created_at": time.time(),
+                  "basis": dict(state["best"]), "supersedes": state.get("pending_decision")}
+        relative = "decisions/decision-" + uuid.uuid4().hex + ".json"
+        path = root / relative
+        path.parent.mkdir(exist_ok=True)
+        atomic_write_json(path, record)
+        reference = {"path": relative, "sha256": sha256(path)}
+        state.setdefault("decisions", []).append(reference)
+        state["pending_decision"] = reference
+        atomic_write_json(root / "state.json", state)
+    return {"reference": reference, "decision": record, "status": status(root)}
+
+
 def _token_totals(records):
     totals = usage_totals(records)
     fields = ("input_tokens", "output_tokens", "cached_input_tokens", "total_tokens", "cost")
@@ -199,8 +248,11 @@ def _summary(root, plan, state):
         "usage": _token_totals(rounds), "usage_scope": "caller_round_exports",
         "session_usage_export": final.get("observations") if final else None,
         "knowledge_deliveries": state["contexts"],
+        "experiment_decisions": state.get("decisions", []),
         "curve": [
             {"round": index + 1, "hypothesis": item["hypothesis"],
+             "decision": item.get("decision"),
+             "decision_feedback": item.get("decision_feedback"),
              "assessment": item["assessment"], "best_score": item["best_after"]["score"],
              "cumulative_usage": _token_totals(rounds[:index + 1])}
             for index, item in enumerate(rounds)
@@ -266,7 +318,13 @@ def _settle(root, plan, state, pending, execution, assess):
                              "path": pending["path"] + "/" + plan["candidate_name"],
                              "sha256": pending["candidate_sha256"], "score": score}
         record["best_after"] = dict(state["best"])
+        if pending.get("decision") and not state.get("integrity_error"):
+            from .experiment_decisions import feedback
+
+            receipt = json.loads((root / pending["decision"]["path"]).read_text(encoding="utf-8"))
+            record["decision_feedback"] = feedback(receipt, record, plan["selection"])
         state["rounds"].append(record)
+        state["pending_decision"] = None
     else:
         state["final"] = record
         state["state"] = "completed" if assessment["status"] == "completed" else "blocked"
@@ -301,6 +359,16 @@ def evaluate_round(root: Path, *, candidate: Path | None, hypothesis: str,
             raise ValueError("Round budget consumed, run independent final evaluation")
         if not final and (not isinstance(hypothesis, str) or not hypothesis.strip()):
             raise ValueError("Declare the round hypothesis before execution")
+        decision = state.get("pending_decision") if not final else None
+        if not final and plan.get("decision_policy") == "recorded" and decision is None:
+            raise ValueError("Submit a current experiment decision with propose before round")
+        if decision:
+            receipt = json.loads((root / decision["path"]).read_text(encoding="utf-8"))
+            if (receipt["basis"]["sha256"] != state["best"]["sha256"]
+                    or receipt["round"] != count + 1):
+                raise ValueError("Experiment decision is stale")
+            if receipt["assessment"].get("action") == "probe":
+                raise ValueError("Complete the probe and propose an implementation before round")
         source = root / state["best"]["path"] if final else Path(candidate)
         if (source.is_symlink() or (plan["candidate_kind"] == "file"
                 and (not source.is_file() or source.suffix != ".py"))
@@ -319,6 +387,7 @@ def evaluate_round(root: Path, *, candidate: Path | None, hypothesis: str,
                    "candidate_id": state["best"].get("candidate_id", "baseline") if final
                    else f"candidate-{count + 1:03d}",
                    "hypothesis": hypothesis, "observations": observations,
+                   "decision": decision,
                    "candidate_sha256": fingerprint,
                    "contexts": list(state["contexts"]), "started_at": time.time()}
         state["pending"] = pending

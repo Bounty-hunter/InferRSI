@@ -70,6 +70,110 @@ def submit(root, factor, capsys, usage=None):
     return json.loads(capsys.readouterr().out)
 
 
+def decision_payload(root):
+    state = json.loads((root / "state.json").read_text())
+    return {"schema_version": 1, "based_on_sha256": state["best"]["sha256"],
+            "alternatives": [{"id": "a", "change": "Synthetic factor change",
+                "mechanism": "Exercise the real subprocess control path",
+                "evidence": ["Frozen synthetic TASK.md"], "cost": "One synthetic evaluation",
+                "risk": "Deliberately invalid factors must still fail correctness",
+                "impact": {"kind": "unknown", "reason": "Synthetic control, no device forecast",
+                           "next_check": "Run frozen evaluator"}}],
+            "selected": "a", "rationale": "Exercise a bounded independent hypothesis"}
+
+
+def test_recorded_decision_gate_and_measurement_priority(tmp_path, task, capsys):
+    root = tmp_path / "recorded"
+    assert main(["benchmarks", "session", "start", task.name, "--session", str(root),
+        "--rounds", "2", "--max-minutes", "5", "--evaluation-timeout-seconds", "15",
+        "--condition", "decision-control", "--evaluation-args", "",
+        "--decision-policy", "recorded", "--knowledge", "off"]) == 0
+    started = json.loads(capsys.readouterr().out)
+    assert started["next_action"] == "submit_experiment_decision_before_editing"
+    assert started["decision_template"]["based_on_sha256"] == started["best"]["sha256"]
+    assert "propose --input" in started["instructions"]
+    assert started["decision_guidance"]
+    with pytest.raises(SystemExit):
+        submit(root, 2, capsys)
+    capsys.readouterr()
+    assert not (root / "calls.log").exists()
+    source = tmp_path / "decision.json"
+    proposal = decision_payload(root)
+    source.write_text(json.dumps(proposal), encoding="utf-8")
+    assert main(["benchmarks", "session", "propose", "--session", str(root),
+                 "--input", str(source)]) == 0
+    receipt = json.loads(capsys.readouterr().out)["reference"]
+    result = submit(root, 2, capsys)
+    assert result["latest_observation"]["decision"] == receipt
+    feedback = result["latest_observation"]["decision_feedback"]
+    assert feedback["observed"]["retained_as_best"] is True
+    assert feedback["forecast"]["kind"] == "unknown"
+    assert result["pending_decision"] is None
+    # An old decision cannot silently be reused against the newly selected code.
+    with pytest.raises(SystemExit):
+        main(["benchmarks", "session", "propose", "--session", str(root),
+              "--input", str(source)])
+    capsys.readouterr()
+    proposal = decision_payload(root)
+    proposal["alternatives"][0]["impact"] = {
+        "kind": "conditional_serial_latency", "fraction": [.9, .9],
+        "local_speedup": [100, 100], "overhead_fraction": [0, 0],
+        "assumptions": "Synthetic optimistic claim", "input_evidence": "Unverified fixture"}
+    source.write_text(json.dumps(proposal), encoding="utf-8")
+    assert main(["benchmarks", "session", "propose", "--session", str(root),
+                 "--input", str(source)]) == 0
+    capsys.readouterr()
+    failed = submit(root, -1, capsys)
+    assert failed["latest_observation"]["assessment"]["verdict"] == "FAIL"
+    assert failed["best"]["score"] == 2
+    feedback = failed["latest_observation"]["decision_feedback"]
+    assert feedback["forecast"]["speedup_range"][0] > 9
+    assert feedback["observed"]["verdict"] == "FAIL"
+    assert feedback["observed"]["retained_as_best"] is False
+    assert feedback["calibration"]["speedup_vs_decision_basis"] is None
+    assert main(["benchmarks", "session", "final", "--session", str(root)]) == 0
+    capsys.readouterr()
+    assert (root / "calls.log").read_text().splitlines() == ["2", "-1", "2"]
+
+
+def test_probe_must_be_revised_without_spending_a_round(session, tmp_path, capsys):
+    source = tmp_path / "decision.json"
+    payload = decision_payload(session)
+    payload["action"] = "probe"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    assert main(["benchmarks", "session", "propose", "--session", str(session),
+                 "--input", str(source)]) == 0
+    probe = json.loads(capsys.readouterr().out)
+    assert probe["status"]["next_action"] == "run_selected_probe_then_revise_decision"
+    with pytest.raises(SystemExit):
+        submit(session, 2, capsys)
+    capsys.readouterr()
+    assert not (session / "calls.log").exists()
+    payload["action"] = "implement"
+    payload["alternatives"][0]["evidence"].append("Synthetic probe result supports implementation")
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    assert main(["benchmarks", "session", "propose", "--session", str(session),
+                 "--input", str(source)]) == 0
+    revised = json.loads(capsys.readouterr().out)
+    assert revised["decision"]["supersedes"] == probe["reference"]
+    assert revised["status"]["completed_rounds"] == 0
+    result = submit(session, 2, capsys)
+    assert result["completed_rounds"] == 1
+    assert result["latest_observation"]["decision"] == revised["reference"]
+
+
+def test_decision_receipt_mutation_blocks_evaluation(session, tmp_path, capsys):
+    source = tmp_path / "decision.json"
+    source.write_text(json.dumps(decision_payload(session)), encoding="utf-8")
+    assert main(["benchmarks", "session", "propose", "--session", str(session),
+                 "--input", str(source)]) == 0
+    reference = json.loads(capsys.readouterr().out)["reference"]
+    (session / reference["path"]).write_text("{}", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        submit(session, 2, capsys)
+    assert not (session / "calls.log").exists()
+
+
 def test_started_task_uses_frozen_protocol_without_registry(session, capsys, monkeypatch):
     def unavailable(*args):
         raise AssertionError("The running campaign must not rediscover its task")

@@ -46,6 +46,12 @@ Final evaluation reserves one evaluation timeout from the total budget by
 default; `--final-reserve-seconds` changes that explicit reservation. Use
 `--knowledge off` for a condition that disables managed knowledge retrieval.
 
+For a new experiment, `--decision-policy recorded` optionally requires a retained
+`propose --input <decision.json>` before each round. This shared Harness option
+captures alternatives, expected impact or unknowns, evidence and cost; it also
+works with knowledge off. It does not change the frozen evaluator or prove the
+forecast. See [decision receipts](optimization-decisions.md).
+
 ## Retrieve knowledge and propose a change
 
 When the chosen experimental condition permits RSI knowledge, retrieve it through
