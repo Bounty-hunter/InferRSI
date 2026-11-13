@@ -21,6 +21,8 @@ def load(path, name):
 
 def trace_summary(events):
     """Keep categories separate: inclusive CPU durations cannot be added to kernels."""
+    processes = {event.get("pid"): event.get("args", {}).get("name") for event in events
+                 if event.get("ph") == "M" and event.get("name") == "process_name"}
     groups = collections.defaultdict(lambda: collections.defaultdict(lambda: [0, 0.0]))
     for event in events:
         if event.get("ph") != "X" or not isinstance(event.get("dur"), (int, float)):
@@ -28,7 +30,11 @@ def trace_summary(events):
         duration = event["dur"]
         if duration <= 0:
             continue
-        category = str(event.get("cat", "uncategorized"))
+        process = processes.get(event.get("pid"))
+        category = str(event.get("cat") or process or "uncategorized")
+        if (process == "Ascend Hardware"
+                and str(event.get("args", {}).get("Task Type", "")).startswith("KERNEL")):
+            category = "kernel"
         row = groups[category][str(event.get("name", "unnamed"))]
         row[0] += 1
         row[1] += duration

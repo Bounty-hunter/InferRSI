@@ -23,3 +23,19 @@ def test_cpu_only_trace_is_not_complete_npu_profile():
     summary = MODULE.trace_summary(events)
     assert MODULE.observed_activities(summary) == {"cpu": True, "npu": True}
     assert len(summary) == 2  # Device and nested host durations stay in separate categories.
+
+
+def test_ascend_hardware_tasks_are_not_confused_with_overlap_analysis():
+    events = [
+        {"ph": "M", "name": "process_name", "pid": 1, "args": {"name": "Ascend Hardware"}},
+        {"ph": "M", "name": "process_name", "pid": 2, "args": {"name": "Overlap Analysis"}},
+        {"ph": "X", "name": "Cast", "pid": 1, "dur": 20,
+         "args": {"Task Type": "KERNEL_AIVEC"}},
+        {"ph": "X", "name": "Computing", "pid": 2, "dur": 20},
+        {"ph": "X", "name": "aten::to", "pid": 3, "cat": "cpu_op", "dur": 100},
+    ]
+    summary = MODULE.trace_summary(events)
+    kernel, = [row for row in summary if row["category"] == "kernel"]
+    assert kernel["event_count"] == 1
+    assert kernel["summed_event_ms_not_wall_time"] == pytest.approx(.02)
+    assert MODULE.observed_activities(summary) == {"cpu": True, "npu": True}
