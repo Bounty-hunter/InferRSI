@@ -52,3 +52,21 @@ def test_concurrency_and_missing_evidence_are_not_serial_latency_estimates():
     impact["input_evidence"] = ""
     with pytest.raises(ValueError):
         forecast(impact)
+
+
+def test_agent_estimate_keeps_assumptions_separate_from_measurement():
+    impact = {"kind": "agent_estimate", "objective_ratio_range": [.85, 1.05],
+              "observations": "Synthetic hotspot trace, no hardware claim",
+              "assumptions": "May remove dispatches but adds packing",
+              "derivation": "Synthetic interval includes an end-to-end regression"}
+    result = forecast(impact)
+    assert result["objective_ratio_range"] == [.85, 1.05]
+    assert result["speedup_range"] is None  # No implicit latency/throughput inversion.
+    assert result["evidence_status"] == "agent_hypothesis_not_measured_or_calibrated"
+    impact["assumptions"] = ""
+    with pytest.raises(ValueError):
+        forecast(impact)
+    impact["assumptions"] = "Unverified hypothesis"
+    impact["objective_ratio_range"] = [0, 1]
+    with pytest.raises(ValueError):
+        forecast(impact)

@@ -83,6 +83,10 @@ def _load(root):
     for reference in decisions:
         if sha256(root / reference["path"]) != reference["sha256"]:
             raise ValueError("Retained experiment decision changed")
+        receipt = json.loads((root / reference["path"]).read_text(encoding="utf-8"))
+        profile = receipt.get("profile_artifact")
+        if profile and sha256(root / profile["path"]) != profile["sha256"]:
+            raise ValueError("Retained profile summary changed")
     if state.get("pending_decision") and state["pending_decision"] not in decisions:
         raise ValueError("Pending decision is not a retained receipt")
     for record in [*state["rounds"], *([state["final"]] if state["final"] else [])]:
@@ -153,6 +157,8 @@ def status(root: Path) -> dict:
         "best": state["best"], "pending": state["pending"],
         "pending_decision": state.get("pending_decision"),
         "decision_template": decision_template,
+        "decision_objective": {**plan["selection"],
+                               "forecast_basis": "current_incumbent_not_original_baseline"},
         "latest_observation": state["rounds"][-1] if state["rounds"] else None,
         "summary": str(root / "summary.json") if state["final"] is not None else None,
     }
@@ -196,7 +202,7 @@ def _usage_record(source):
 
 
 def register_decision(root: Path, source: Path) -> dict:
-    from .experiment_decisions import assess
+    from .experiment_decisions import assess, retain_profile
 
     with _locked(root):
         plan, state = _load(root)
@@ -208,6 +214,7 @@ def register_decision(root: Path, source: Path) -> dict:
         payload = json.loads(source.read_text(encoding="utf-8"))
         assessment = assess(payload, basis_sha256=state["best"]["sha256"])
         record = {"schema_version": 1, "proposal": payload, "assessment": assessment,
+                  "profile_artifact": retain_profile(root, payload, state),
                   "round": len(state["rounds"]) + 1, "created_at": time.time(),
                   "basis": dict(state["best"]), "supersedes": state.get("pending_decision")}
         relative = "decisions/decision-" + uuid.uuid4().hex + ".json"

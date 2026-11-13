@@ -162,6 +162,60 @@ def test_probe_must_be_revised_without_spending_a_round(session, tmp_path, capsy
     assert result["latest_observation"]["decision"] == revised["reference"]
 
 
+def test_profile_identity_retention_and_mutation(session, tmp_path, capsys):
+    source = tmp_path / "decision.json"
+    payload = decision_payload(session)
+    profile = session / "profile.json"
+    report = {"kind": "runtime_profile", "status": "completed", "profiler": "synthetic",
+              "source_sha256": "not-a-retained-source"}
+    profile.write_text(json.dumps(report), encoding="utf-8")
+    payload["profile"] = {"path": "profile.json", "applicability": "Synthetic control"}
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(SystemExit):
+        main(["benchmarks", "session", "propose", "--session", str(session),
+              "--input", str(source)])
+    capsys.readouterr()
+    report["source_sha256"] = payload["based_on_sha256"]
+    profile.write_text(json.dumps(report), encoding="utf-8")
+    assert main(["benchmarks", "session", "propose", "--session", str(session),
+                 "--input", str(source)]) == 0
+    retained = json.loads(capsys.readouterr().out)["decision"]["profile_artifact"]
+    assert retained["relation"] == "current"
+    profile.unlink()  # The retained receipt no longer depends on the caller's mutable path.
+    submit(session, 2, capsys)
+    profile.write_text(json.dumps(report), encoding="utf-8")
+    payload["based_on_sha256"] = decision_payload(session)["based_on_sha256"]
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    assert main(["benchmarks", "session", "propose", "--session", str(session),
+                 "--input", str(source)]) == 0
+    receipt = json.loads(capsys.readouterr().out)["decision"]
+    assert receipt["profile_artifact"]["relation"] == "historical"
+    (session / retained["path"]).write_text("{}", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        submit(session, 3, capsys)
+    capsys.readouterr()
+    assert (session / "calls.log").read_text().splitlines() == ["2"]
+
+
+def test_agent_estimate_does_not_promote_failed_candidate(session, tmp_path, capsys):
+    source = tmp_path / "decision.json"
+    payload = decision_payload(session)
+    payload["alternatives"][0]["impact"] = {
+        "kind": "agent_estimate", "objective_ratio_range": [2, 3],
+        "observations": "Synthetic fixture", "assumptions": "Optimistic model hypothesis",
+        "derivation": "Synthetic test of unverified bounds, not a hardware claim"}
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    assert main(["benchmarks", "session", "propose", "--session", str(session),
+                 "--input", str(source)]) == 0
+    capsys.readouterr()
+    failed = submit(session, -1, capsys)
+    feedback = failed["latest_observation"]["decision_feedback"]
+    assert feedback["forecast"]["objective_ratio_range"] == [2, 3]
+    assert feedback["observed"]["verdict"] == "FAIL"
+    assert failed["best"]["kind"] == "baseline"
+    assert not feedback["observed"]["retained_as_best"]
+
+
 def test_decision_receipt_mutation_blocks_evaluation(session, tmp_path, capsys):
     source = tmp_path / "decision.json"
     source.write_text(json.dumps(decision_payload(session)), encoding="utf-8")

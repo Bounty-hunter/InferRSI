@@ -3,8 +3,42 @@
 This opt-in Harness path retains why an Agent chose the next experiment, including
 expected impact and uncertainty. It works for ordinary `campaign` requests and
 packaged `benchmarks session` tasks, with knowledge enabled or disabled. It does
-not predict arbitrary program performance, rank alternatives automatically, or
+not rank alternatives automatically, certify Agent predictions, or
 change correctness, promotion or final-evaluation rules.
+
+The recorded guidance now starts from an actual runtime profile, then asks the
+Agent to estimate and select. Use an existing applicable profile or collect one
+with the task/project's tools. Whole-task timers and source inspection are not
+profiling. Refresh when the bottleneck may have changed, not mechanically each
+round. The Agent may hypothesize an unwritten implementation's local speedup;
+unmeasured assumptions must be labeled, but do not alone force `unknown`.
+No microbenchmark or automated prediction service is required.
+
+`agent_estimate` impact contains a positive ordered `objective_ratio_range`
+(`new candidate objective / current incumbent objective`), and nonempty
+`observations`, `assumptions` and `derivation` strings. For latency minimization,
+a ratio below one is better; for throughput or speedup maximization, above one
+is better. The returned `decision_objective` gives the metric and direction.
+Explain how observed hotspots, call counts and overlap support the estimate,
+and how speculative local gains and added overhead produce the aggregate range.
+These are Agent hypotheses, not measurements or calibrated confidence intervals.
+Do not use raw kernel duration shares as exposed request-time fractions.
+
+Attach `profile: {"path": "<summary.json>", "applicability": "<why relevant now>"}`
+to a proposal. Relative paths resolve against the campaign. A supplied summary
+must be JSON with `kind: runtime_profile`, `status: completed`, `profiler`, and
+`source_sha256` matching a retained campaign implementation (for a project, its
+declared candidate-tree identity). Harness retains and hashes the summary,
+checks it on subsequent operations, and labels older-source evidence historical.
+This establishes provenance and integrity, not the correctness of the diagnostic
+or its interpretation. Keep raw traces with the campaign's diagnostic artifacts.
+Old proposals without `profile` remain valid for compatibility; the Agent-facing
+workflow requests profiling, rather than claiming Python can prove it happened.
+
+The Qwen task supplies `profile_workload.py`, whose command and limitations are
+in its TASK.md. It profiles the supplied implementation on the task's measured
+shapes and returns CPU/NPU trace summaries and separate unprofiled request times.
+Task-specific profiling stays in the task, outside common Harness code.
 
 Choose `--decision-policy recorded` when starting a new campaign with the usual
 task, budget and evaluation arguments. The default `agent` policy preserves the
@@ -33,6 +67,10 @@ The JSON contract is:
 {
   "schema_version": 1,
   "based_on_sha256": "<best.sha256 returned by status>",
+  "profile": {
+    "path": "diagnostics/profile-01/profile.json",
+    "applicability": "<profiled source, workload coverage and applicability to current code>"
+  },
   "alternatives": [
     {
       "id": "reuse",
@@ -42,9 +80,11 @@ The JSON contract is:
       "cost": "<editing, diagnostic and verification work in stated units or a qualitative range>",
       "risk": "<correctness, lifetime, precision and performance uncertainties>",
       "impact": {
-        "kind": "unknown",
-        "reason": "No matching exposed-time measurement yet",
-        "next_check": "<cheapest check that could change the experiment choice>"
+        "kind": "agent_estimate",
+        "objective_ratio_range": [null, null],
+        "observations": "<measured profile facts>",
+        "assumptions": "<hypothesized local gain and additional costs>",
+        "derivation": "<how these imply a new/current aggregate objective range>"
       }
     }
   ],
@@ -54,7 +94,8 @@ The JSON contract is:
 }
 ```
 
-Use one to eight alternatives and keep the input within 64 KiB. Evidence strings
+Replace both null placeholders with your estimated numerical bounds. Use one to
+eight alternatives and keep the input within 64 KiB. Evidence strings
 are caller assertions; this command does not fetch them or certify their truth.
 An unknown impact is valid and has no numerical forecast. Do not invent numbers
 to satisfy the workflow. A small full-task contrast can be cheaper than profiling;

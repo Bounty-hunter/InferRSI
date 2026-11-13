@@ -120,6 +120,33 @@ or baseline failure. Candidate import/execution consumes an attempt. A failure
 keeps its evidence and has no valid speed score. The caller must collect process
 termination and allocation-release evidence when cancelling or timing out a run.
 
+## Diagnostic profiling for experiment selection
+
+When the selected decision policy asks for profiling, collect a real CPU/NPU
+trace of the current retained implementation before selecting the first change:
+
+```bash
+npu run --gpus 1 --timeout 10m --wait 30m -- \
+  python profile_workload.py --candidate <current-retained-source.py> \
+  --output-dir <campaign>/diagnostics/profile-01
+```
+
+Use the frozen task's copy of this script. It profiles all three measured case
+shapes by default, preserving their original seed indices; `--case <id>` can
+restrict diagnostics but cannot establish aggregate task benefit. Keep its
+`profile.json`, source snapshot and raw traces in the campaign. In a recorded
+proposal attach `profile.path` (relative to the campaign) and an explicit
+`profile.applicability` explanation. Reuse or refresh according to source and
+bottleneck changes; no mandatory per-round profiling or per-candidate demo.
+
+Read the categories, calls and separate unprofiled request times, then map them
+to the current source. Inclusive CPU durations contain nested calls; CPU and NPU
+times may overlap. Do not sum them or substitute kernel shares for exposed
+whole-request latency. Profile overhead changes timings. Estimate benefits as
+explicit hypotheses, select by potential aggregate benefit, implementation cost
+and risk, and use the unchanged complete evaluation for acceptance. The profile
+does not perform quality validation and cannot produce a PASS or optimization score.
+
 ## Scope
 
 This task measures a scaled denoiser with synthetic weights and conditioning.
