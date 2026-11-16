@@ -69,6 +69,25 @@ def submit(project, capsys, metric):
     return code, json.loads(capsys.readouterr().out)
 
 
+def test_project_uses_same_efficient_diagnostic_path(project, capsys, tmp_path):
+    start(project, capsys, extra=("--decision-policy", "efficient", "--knowledge", "off"))
+    root = project[-1]
+    script = tmp_path / "probe.py"
+    script.write_text("import sys\nfrom pathlib import Path\n"
+                      "assert (Path(sys.argv[1])/'engine.py').is_file()\n")
+    assert main(["campaign", "diagnose", "--directory", str(root),
+                 "--question", "Is the project snapshot complete?",
+                 "--if-supported", "Implement", "--if-rejected", "Investigate inputs",
+                 "--command", f'"{{python}}" "{script}" "{{candidate}}"',
+                 "--timeout-seconds", "10"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["completed_rounds"] == 0 and view["best"]["score"] is None
+    assert view["diagnostic"]["status"] == "completed"
+    with pytest.raises(SystemExit):
+        main(["campaign", "knowledge", "--directory", str(root),
+              "--reuse", "unused.json"])
+
+
 def test_project_decision_gate_works_without_knowledge(project, capsys, tmp_path):
     view = start(project, capsys, extra=("--decision-policy", "recorded", "--knowledge", "off"))
     root = project[-1]

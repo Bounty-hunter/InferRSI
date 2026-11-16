@@ -54,6 +54,17 @@ def _session_assess(root, directory, plan, execution):
     return protocol(root / "frozen").assess(directory, plan["evaluation_settings"], execution)
 
 
+def _session_diagnose(root, directory, plan, pending):
+    from inferrsi.harness.scenarios.external import execute_trial
+
+    environment = runtime_environment()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    remaining = max(0, pending["deadline"] - time.time())
+    return execute_trial((*plan["evaluation_prefix"], *pending["command"]), root,
+                         directory / "execution", time.monotonic() + remaining, None,
+                         environment=environment)
+
+
 def _project_execute(root, directory, plan, deadline):
     from inferrsi.harness.candidates import identity, members, retain
     from inferrsi.harness.project import inspect_step, steps
@@ -116,6 +127,7 @@ def _runtime_identity():
              "harness/atomic_json.py",
              "harness/usage.py", "harness/agent_sessions.py", "harness/task_protocol.py",
              "harness/candidates.py", "harness/project.py", "harness/experiment_decisions.py",
+             "harness/experiment_efficiency.py", "harness/diagnostics.py",
              "harness/records/knowledge_capture.py", "apps/campaign.py",
              "knowledge/context_projection.py")
     return {name: sha256(root / name) for name in names}
@@ -208,6 +220,19 @@ def session_command(args, *, task_source: Path | None = None, knowledge_reader=N
                 "Fill the returned decision_template; repository users can also read "
                 "docs/optimization-decisions.md for conditional impact ranges."
             )
+        if plan["decision_policy"] == "efficient":
+            from inferrsi.harness.experiment_efficiency import guidance
+
+            result["decision_guidance"] = guidance()
+            result["instructions"] += (
+                " Use search_context to avoid repeated unsuccessful work. Numerical estimates "
+                "and propose are optional; round --hypothesis is sufficient. For a cheap "
+                "decision-changing check, use diagnose --question --if-supported --if-rejected "
+                "--command --timeout-seconds. It uses the frozen allocator prefix, retains "
+                "evidence, consumes time but no candidate round, and cannot promote code. "
+                "Commands accept {python}, {candidate} (snapshot of best), {baseline}, {task}, "
+                "{output}, {result}. Reuse knowledge via knowledge --reuse <retained context path>."
+            )
         return result
     import json
 
@@ -218,7 +243,15 @@ def session_command(args, *, task_source: Path | None = None, knowledge_reader=N
         return optimization.status(root)
     if args.session_action == "propose":
         return optimization.register_decision(root, args.input)
+    if args.session_action == "diagnose":
+        return optimization.run_diagnostic(root, execute=_session_diagnose,
+            command=args.diagnostic_command, question=args.question, if_supported=args.if_supported,
+            if_rejected=args.if_rejected, timeout=args.timeout_seconds, inputs=args.input)
     if args.session_action == "knowledge":
+        if args.reuse:
+            return optimization.reuse_context(root, args.reuse)
+        if args.context_bytes is None:
+            raise ValueError("New knowledge queries require --context-bytes")
         if knowledge_reader is None or retain_context is None:
             raise ValueError("A knowledge reader and capture callback are required")
         return optimization.capture_context(root, knowledge_reader, retain_context=retain_context,

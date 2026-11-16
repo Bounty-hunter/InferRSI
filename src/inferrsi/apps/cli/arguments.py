@@ -71,7 +71,7 @@ def _optimization_actions(stages, *, project=False):
     else:
         start.add_argument("task")
         start.add_argument("--evaluation-args", required=True)
-        start.set_defaults(round_mode="exact")
+        start.add_argument("--round-mode", choices=("exact", "up_to"), default="exact")
     start.add_argument("--session", "--directory", dest="session", type=Path, required=True)
     start.add_argument("--rounds", type=int, required=True)
     start.add_argument("--max-minutes", type=float, required=True)
@@ -80,16 +80,28 @@ def _optimization_actions(stages, *, project=False):
     start.add_argument("--condition", default="current-agent" if project else None,
                        required=not project)
     start.add_argument("--knowledge", choices=("on", "off"), default="on")
-    start.add_argument("--decision-policy", choices=("agent", "recorded"), default="agent",
-                       help="Require a retained proposal before each round when recorded")
+    start.add_argument("--decision-policy", choices=("agent", "recorded", "efficient"),
+                       default="agent", help="agent: original; recorded: proposal gate; "
+                       "efficient: concise feedback and optional diagnostic decisions")
     start.add_argument("--evaluation-prefix", default="", help="Quoted allocator argv prefix")
     start.add_argument("--python", default=sys.executable)
-    for name in ("status", "round", "final", "recover", "knowledge", "propose"):
+    for name in ("status", "round", "final", "recover", "knowledge", "propose", "diagnose"):
         stage = stages.add_parser(name)
         stage.set_defaults(session_action=name)
         stage.add_argument("--session", "--directory", dest="session", type=Path, required=True)
         if name == "propose":
             stage.add_argument("--input", type=Path, required=True, help="Experiment decision JSON")
+        if name == "diagnose":
+            stage.add_argument("--question", required=True)
+            stage.add_argument("--if-supported", required=True,
+                               help="Next action if the diagnostic supports the hypothesis")
+            stage.add_argument("--if-rejected", required=True,
+                               help="Different next action if it rejects the hypothesis")
+            stage.add_argument("--command", dest="diagnostic_command", required=True,
+                               help="Diagnostic argv, never a shell")
+            stage.add_argument("--input", type=Path, action="append", default=[],
+                               help="Freeze a file, referenced as {input:filename} in argv")
+            stage.add_argument("--timeout-seconds", type=float, required=True)
         if name == "round":
             stage.add_argument("--candidate", type=Path, required=True)
             stage.add_argument("--hypothesis", required=True)
@@ -98,10 +110,12 @@ def _optimization_actions(stages, *, project=False):
         if name in ("round", "final"):
             stage.add_argument("--usage-export", type=Path)
         if name == "knowledge":
-            stage.add_argument("--query", required=True)
+            source = stage.add_mutually_exclusive_group(required=True)
+            source.add_argument("--query")
+            source.add_argument("--reuse", help="Retained context path returned by this campaign")
             stage.add_argument("--relevance-method", choices=RELEVANCE_METHODS,
                                default="weighted-lexical-v1")
-            stage.add_argument("--context-bytes", type=int, required=True)
+            stage.add_argument("--context-bytes", type=int)
             stage.add_argument("--limit", type=int, default=5)
 
 

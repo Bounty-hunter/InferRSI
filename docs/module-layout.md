@@ -191,11 +191,13 @@ checked. These declarations do not make arbitrary candidate code isolated.
 | `benchmark.tasks.moe-forward-npu.benchmark` | module | `_process_spec` |
 | `benchmark.tasks.moe-forward-npu.grader` | `load` | `spec` |
 | `benchmark.tasks.qwen21-denoise-npu.benchmark` | `load` | `spec` |
+| `benchmark.tasks.qwen21-denoise-npu.profile_workload` | `load` | `spec` |
 | `benchmark.tasks.qwen3-tts-npu.benchmark` | module | `_evaluation_spec` |
 
 The report adds a `runtime resource loaders` blocker when these loaders are
 present and does not claim either complete isolation or new-core closure
-isolation. R1 changed none of these five declarations; closing them is R3 (#412).
+isolation. R1 changed none of the original five declarations; Qwen profiling
+adds the sixth. Closing these resource boundaries remains R3 (#412).
 
 R1 (#412) deleted the three root forwarders of the old run chain and removed
 their `LEGACY_RUN_FORWARDERS` registration from `tests/_gate_policy_support.py`.
@@ -224,13 +226,14 @@ present; or the scan reports a violation. The three packages may appear in stage
 A clean graph for the new cores is reported separately as "new core business
 closure isolated" and never sets overall `isolation_complete` to true.
 
-On the tree after A1 (#408), `first_wave_report()` has no violation and two
-blockers, so `isolation_complete` is false and A1 does not claim otherwise:
+On the current tree, including A1 (#408) and the experiment diagnostics,
+`first_wave_report()` has no violation and two blockers, so
+`isolation_complete` remains false:
 
 | Blocker | Cause | Closed by |
 | --- | --- | --- |
-| `harness reaches model/infra` (12 hits) | `agent_sessions`, `candidates`, `optimization`, `optimization_session`, `project` and `task_protocol` each reach `inferrsi.infra` and `inferrsi.infra.artifacts` | R2 (#412) |
-| `runtime resource loaders: 5` | The five declared loaders in the table above | R3 (#412) |
+| `harness reaches model/infra` (16 hits) | `agent_sessions`, `candidates`, `diagnostics`, `experiment_decisions`, `optimization`, `optimization_session`, `project` and `task_protocol` each reach `inferrsi.infra` and `inferrsi.infra.artifacts` | R2 (#412) |
+| `runtime resource loaders: 6` | The six declared loaders in the table above | R3 (#412) |
 
 R1 cleared the `allowlist` and `legacy run forwarders` blockers, and A1 cleared
 the `temporary leaf importers` blocker that R1 left for root `arguments.py`. The loaders

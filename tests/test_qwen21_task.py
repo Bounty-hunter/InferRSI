@@ -71,6 +71,30 @@ def test_standalone_import_guard_blocks_engine_names():
     assert guard.find_spec("torch_npu") is None
 
 
+@pytest.mark.parametrize("error", [TypeError("wrong arguments"), ValueError("invalid view"),
+    RuntimeError("npu_fusion_attention: get unsupported atten_mask shape [1,1,1,128]")])
+def test_explicit_candidate_invocation_errors_are_repairable(error):
+    worker = load("benchmark")
+
+    def fail(*args, **kwargs):
+        raise error
+
+    with pytest.raises(worker.CandidateContractError):
+        worker.invoke_compute(fail, (), {}, {}, candidate=True)
+    with pytest.raises(type(error)):
+        worker.invoke_compute(fail, (), {}, {}, candidate=False)
+
+
+def test_unknown_device_failure_is_not_a_candidate_rejection():
+    worker = load("benchmark")
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("aclnnFlashAttentionScore failed: driver resource busy")
+
+    with pytest.raises(RuntimeError):
+        worker.invoke_compute(fail, (), {}, {}, candidate=True)
+
+
 @pytest.mark.parametrize("source", ["def compute(:\n", "VALUE = 1\n",
                                         "def compute(x):\n    return x\n"])
 def test_candidate_entry_contract_errors_consume_round_without_blocking(

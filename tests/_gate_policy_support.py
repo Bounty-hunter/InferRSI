@@ -42,6 +42,7 @@ RESOURCE_LOADERS = {
     "inferrsi.benchmark.tasks.moe-forward-npu.benchmark": ("<module>", "_process_spec"),
     "inferrsi.benchmark.tasks.moe-forward-npu.grader": ("load", "spec"),
     "inferrsi.benchmark.tasks.qwen21-denoise-npu.benchmark": ("load", "spec"),
+    "inferrsi.benchmark.tasks.qwen21-denoise-npu.profile_workload": ("load", "spec"),
     "inferrsi.benchmark.tasks.qwen3-tts-npu.benchmark": ("<module>", "_evaluation_spec"),
 }
 # #412 R1 deleted these eleven root modules: the seven Knowledge shells, the three

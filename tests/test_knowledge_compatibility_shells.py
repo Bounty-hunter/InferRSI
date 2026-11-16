@@ -282,19 +282,20 @@ def test_package_init_and_infra_inspection_load_no_knowledge_body():
 
 def test_knowledge_closure_is_clean_while_overall_stays_false():
     # K01-5: the Knowledge package exists and its closure is clean. R1 cleared the
-    # allowlist and the old-run forwarders. The parser entry due in A1, the twelve
-    # harness -> infra hits (R2) and the five runtime resource loaders (R3) remain,
+    # allowlist and the old-run forwarders. The sixteen harness -> infra hits
+    # (R2) and the six runtime resource loaders (R3) remain,
     # and the loaders keep new_core_closure_isolated false.
     report = first_wave_report()
     assert report.violations == ()
     assert report.blockers == (
-        "harness reaches model/infra: inferrsi.harness.agent_sessions -> inferrsi.infra (12 hits)",
-        "runtime resource loaders: 5",
+        "harness reaches model/infra: inferrsi.harness.agent_sessions -> inferrsi.infra (16 hits)",
+        "runtime resource loaders: 6",
     )
-    assert len(report.harness_model_infra) == 12
+    assert len(report.harness_model_infra) == 16
     assert {path.split(" -> ")[0] for path in report.harness_model_infra} == {
         f"inferrsi.harness.{name}"
-        for name in ("agent_sessions", "candidates", "optimization", "optimization_session",
+        for name in ("agent_sessions", "candidates", "diagnostics", "experiment_decisions",
+                     "optimization", "optimization_session",
                      "project", "task_protocol")
     }
     assert not report.new_core_closure_isolated

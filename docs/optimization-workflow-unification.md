@@ -1,5 +1,9 @@
 # 普通任务与 Benchmark 任务共用的 RSI 优化流程
 
+可选的 `--decision-policy efficient` 提供简短尝试历史、按需受管诊断与知识复用，
+不要求每轮提交收益区间。普通任务与题库共用同一入口；详见
+[实验效率策略与验证计划](optimization-efficiency.md)。默认策略及正式验收不变。
+
 **Agent 理解需求并修改代码；Harness 固化明确提供的任务和验收协议，执行检查、判定留存结果，管理候选、轮次、预算和最终复测；Benchmark 提供题包及其专用规则；Knowledge 提供按需检索的资料。**
 
 普通用户任务默认在当前 Agent 会话完成。题库 Benchmark 默认交给当前宿主中同一种 Agent 的全新会话；发起方只解析任务配置、派发并回收结果，新会话自行创建优化实验并执行到 final。用户明确要求当前会话时也可直接执行。新会话由 Agent 调用宿主工具创建，Benchmark 不自动启动 Agent。

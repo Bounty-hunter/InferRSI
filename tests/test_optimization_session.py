@@ -82,6 +82,162 @@ def decision_payload(root):
             "selected": "a", "rationale": "Exercise a bounded independent hypothesis"}
 
 
+def test_efficient_policy_needs_no_forecast_or_proposal(tmp_path, task, capsys):
+    root = tmp_path / "efficient"
+    assert main(["benchmarks", "session", "start", task.name, "--session", str(root),
+        "--rounds", "3", "--round-mode", "up_to", "--max-minutes", "5",
+        "--evaluation-timeout-seconds", "15", "--condition", "efficient",
+        "--evaluation-args", "", "--decision-policy", "efficient"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["decision_template"] is None
+    assert "diagnose" in view["instructions"]
+    assert "search_context" in view
+    submit(root, -1, capsys)
+    view = submit(root, 2, capsys)
+    attempts = view["search_context"]["recent_attempts"]
+    assert [r["assessment"]["status"] for r in attempts] == ["candidate_failure", "completed"]
+    assert view["best"]["score"] == 2
+    assert "execution" not in view["latest_observation"]
+    assert main(["benchmarks", "session", "final", "--session", str(root),
+                 "--reason", "Synthetic early stop"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["state"] == "completed" and view["completed_rounds"] == 2
+
+
+def diagnostic_args(root, script):
+    return ["benchmarks", "session", "diagnose", "--session", str(root),
+            "--question", "Does this local check support the change?",
+            "--if-supported", "Implement", "--if-rejected", "Try another direction",
+            "--command", f'"{{python}}" "{script}" "{{result}}" "{{candidate}}"',
+            "--timeout-seconds", "10"]
+
+
+def test_diagnostic_is_real_execution_without_promotion_or_round_consumption(
+        session, tmp_path, capsys):
+    script = tmp_path / "probe.py"
+    script.write_text("import sys, json\nfrom pathlib import Path\n"
+                      "assert Path(sys.argv[2]).read_text().strip() == 'FACTOR = 1'\n"
+                      "Path(sys.argv[1]).write_text(json.dumps({'speedup': 999}))\n")
+    assert main(diagnostic_args(session, script)) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["state"] == "active" and view["completed_rounds"] == 0
+    assert view["best"]["score"] == 1
+    diagnostic = view["diagnostic"]
+    assert diagnostic["status"] == "completed"
+    assert diagnostic["elapsed_seconds"] > 0
+    assert main(["benchmarks", "session", "recover", "--session", str(session)]) == 0
+    capsys.readouterr()
+    assert len(json.loads((session / "state.json").read_text())["diagnostics"]) == 1
+    result = session / diagnostic["path"] / "execution/result.json"
+    result.write_text('{"speedup": 1000}')
+    with pytest.raises(SystemExit):
+        main(["benchmarks", "session", "status", "--session", str(session)])
+
+
+def test_failed_diagnostic_retains_logs_and_allows_another_direction(session, tmp_path, capsys):
+    script = tmp_path / "probe.py"
+    script.write_text("raise ValueError('unsupported shape')\n")
+    assert main(diagnostic_args(session, script)) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["state"] == "active" and view["completed_rounds"] == 0
+    assert view["diagnostic"]["status"] == "failed"
+    assert submit(session, 2, capsys)["best"]["score"] == 2
+
+
+def test_diagnostic_runs_frozen_script_and_retains_nested_observation(
+        session, tmp_path, capsys, monkeypatch):
+    script = tmp_path / "probe.py"
+    script.write_text("import sys\nfrom pathlib import Path\n"
+                      "Path(sys.argv[1], 'observation.json').write_text('original')\n")
+    original = optimization_session._session_diagnose
+
+    def after_snapshot(*args):
+        script.write_text("raise RuntimeError('changed original')\n")
+        return original(*args)
+
+    monkeypatch.setattr(optimization_session, "_session_diagnose", after_snapshot)
+    argv = diagnostic_args(session, script)
+    argv[argv.index("--command") + 1] = '"{python}" "{input:probe.py}" "{output}"'
+    assert main([*argv, "--input", str(script)]) == 0
+    view = json.loads(capsys.readouterr().out)
+    record = view["diagnostic"]
+    assert record["status"] == "completed"
+    assert "output/observation.json" in record["evidence_files"]
+    assert main(["benchmarks", "session", "status", "--session", str(session)]) == 0
+    capsys.readouterr()
+    (session / record["path"] / "inputs/probe.py").write_text("changed snapshot")
+    with pytest.raises(SystemExit):
+        main(["benchmarks", "session", "status", "--session", str(session)])
+
+
+def test_diagnostic_timeout_does_not_claim_cleanup_or_restart(session, tmp_path, capsys):
+    script = tmp_path / "probe.py"
+    script.write_text("import time\ntime.sleep(10)\n")
+    argv = diagnostic_args(session, script)
+    argv[-1] = "0.1"
+    assert main(argv) == 2
+    view = json.loads(capsys.readouterr().out)
+    assert view["state"] == "blocked" and view["diagnostic"]["status"] == "timeout"
+    assert not view["diagnostic"]["execution_settled"]
+    assert main(["benchmarks", "session", "recover", "--session", str(session)]) == 2
+    view = json.loads(capsys.readouterr().out)
+    assert view["state"] == "blocked" and view["completed_rounds"] == 0
+
+
+def test_diagnostic_preserves_final_reserve(session, tmp_path, monkeypatch):
+    from inferrsi.harness import optimization
+
+    state = json.loads((session / "state.json").read_text())
+    plan = json.loads((session / "plan.json").read_text())
+    monkeypatch.setattr(optimization.time, "time",
+                        lambda: state["deadline"] - plan["final_reserve_seconds"])
+    with pytest.raises(SystemExit):
+        main(diagnostic_args(session, tmp_path / "not-executed.py"))
+    assert json.loads((session / "state.json").read_text())["pending"] is None
+
+
+def test_diagnostic_recovery_collects_without_relaunch(session, tmp_path, capsys, monkeypatch):
+    script = tmp_path / "probe.py"
+    script.write_text("print('probe')\n")
+    from inferrsi.harness import optimization
+
+    original = optimization._settle
+
+    def interrupt(*args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(optimization, "_settle", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        main(diagnostic_args(session, script))
+    state = json.loads((session / "state.json").read_text())
+    assert state["pending"]["kind"] == "diagnostic"
+    monkeypatch.setattr(optimization, "_settle", original)
+    assert main(["benchmarks", "session", "recover", "--session", str(session)]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["pending"] is None and len(
+        json.loads((session / "state.json").read_text())["diagnostics"]) == 1
+
+
+def test_explicit_context_reuse_does_not_query_again(session, capsys):
+    from inferrsi.harness.optimization import capture_context
+    from inferrsi.infra.artifacts import sha256
+
+    def retain(root, **request):
+        path = root / "delivered.json"
+        path.write_text('{"text":"fixed evidence"}')
+        return path, sha256(path)
+
+    original = capture_context(session, None, retain_context=retain)
+    assert main(["benchmarks", "session", "knowledge", "--session", str(session),
+                 "--reuse", original["reference"]["path"]]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["reused"] and view["context"] == original["context"]
+    assert len(json.loads((session / "state.json").read_text())["contexts"]) == 1
+    with pytest.raises(SystemExit):
+        main(["benchmarks", "session", "knowledge", "--session", str(session),
+              "--reuse", "../another-campaign/context.json"])
+
+
 def test_recorded_decision_gate_and_measurement_priority(tmp_path, task, capsys):
     root = tmp_path / "recorded"
     assert main(["benchmarks", "session", "start", task.name, "--session", str(root),

@@ -26,15 +26,21 @@ from tests._gate_policy_support import (
 )
 
 
+@pytest.mark.parametrize("relative,owner", [
+    ("harness/task_protocol.py", "protocol"),
+    ("benchmark/tasks/qwen21-denoise-npu/profile_workload.py", "load"),
+])
 @pytest.mark.parametrize("extra", [
     "\nimport importlib\nimportlib.import_module('inferrsi.knowledge')\n",
     "\nimportlib.util.module_from_spec(spec)\n",
     "\ndef another():\n    return importlib.util.module_from_spec(spec)\n",
 ])
-def test_declared_resource_loader_does_not_allow_an_extra_dynamic_edge(tmp_path, extra):
-    task = tmp_path / "harness/task_protocol.py"
-    task.parent.mkdir()
-    source = ("import importlib.util\ndef protocol():\n"
+def test_declared_resource_loader_does_not_allow_an_extra_dynamic_edge(
+    tmp_path, extra, relative, owner,
+):
+    task = tmp_path / relative
+    task.parent.mkdir(parents=True)
+    source = (f"import importlib.util\ndef {owner}():\n"
               "    return importlib.util.module_from_spec(spec)\n")
     task.write_text(source, encoding="utf-8")
     report = first_wave_report(tmp_path)
@@ -45,9 +51,13 @@ def test_declared_resource_loader_does_not_allow_an_extra_dynamic_edge(tmp_path,
     assert any("dynamic import" in item for item in first_wave_report(tmp_path).violations)
 
 
-def test_resource_loader_declaration_does_not_cover_an_adjacent_module(tmp_path):
-    task = tmp_path / "harness/other_protocol.py"
-    task.parent.mkdir()
+@pytest.mark.parametrize("relative", [
+    "harness/other_protocol.py",
+    "benchmark/tasks/qwen21-denoise-npu/other_profile.py",
+])
+def test_resource_loader_declaration_does_not_cover_an_adjacent_module(tmp_path, relative):
+    task = tmp_path / relative
+    task.parent.mkdir(parents=True)
     task.write_text(
         "import importlib.util\ndef protocol():\n"
         "    return importlib.util.module_from_spec(spec)\n",
@@ -150,17 +160,17 @@ class TargetModuleImportGateTest(unittest.TestCase):
         self.assertFalse(hasattr(report, "residuals"))
         self.assertNotIn("residual", kinds)
         self.assertEqual(report.violations, ())
-        # What keeps isolation false after R1: the parser entry due in A1, the six
-        # Harness modules that R2 closes and the five loaders that R3 closes.
+        # Isolation remains incomplete: eight Harness modules still reach Infra,
+        # and six resource loaders (including Qwen diagnostics) execute task code.
         self.assertEqual(
             report.blockers,
             (
                 "harness reaches model/infra: inferrsi.harness.agent_sessions -> "
-                "inferrsi.infra (12 hits)",
-                "runtime resource loaders: 5",
+                "inferrsi.infra (16 hits)",
+                "runtime resource loaders: 6",
             ),
         )
-        self.assertEqual(len(report.harness_model_infra), 12)
+        self.assertEqual(len(report.harness_model_infra), 16)
         self.assertFalse(report.new_core_closure_isolated)
 
     def test_split_skill_eval_modules_reach_no_model_or_infra(self) -> None:

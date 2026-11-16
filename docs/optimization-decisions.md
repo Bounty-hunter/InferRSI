@@ -1,5 +1,9 @@
 # Recorded experiment decisions
 
+For the newer opt-in budget-aware workflow with optional proposals and real
+diagnostic execution, see [optimization efficiency](optimization-efficiency.md).
+This page describes the unchanged `recorded` policy.
+
 This opt-in Harness path retains why an Agent chose the next experiment, including
 expected impact and uncertainty. It works for ordinary `campaign` requests and
 packaged `benchmarks session` tasks, with knowledge enabled or disabled. It does
@@ -139,7 +143,7 @@ conditional range explicitly labeled as unverified caller assumptions. This is
 an arithmetic envelope, not a calibrated confidence interval, achievable bound
 or measurement. It does not sum overlapping kernels or model throughput/SLOs.
 Use unknown when these assumptions do not hold. See the existing
-[headroom skill](../src/inferrsi/data/skill_library/methods/performance-ceiling-analysis/SKILL.md)
+[headroom skill](../src/inferrsi/knowledge/data/skill_library/methods/performance-ceiling-analysis/SKILL.md)
 for selecting evidence. The search-policy skill remains the method owner; this
 optional control path does not create a second knowledge library.
 

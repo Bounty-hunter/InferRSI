@@ -28,7 +28,7 @@ def initialize(root: Path, plan: dict) -> dict:
         raise ValueError("Unknown round policy")
     if plan["selection"]["direction"] not in ("minimize", "maximize"):
         raise ValueError("Unknown selection direction")
-    if plan.get("decision_policy", "agent") not in ("agent", "recorded"):
+    if plan.get("decision_policy", "agent") not in ("agent", "recorded", "efficient"):
         raise ValueError("Unknown decision policy")
     reserve = plan["final_reserve_seconds"]
     if type(reserve) not in (int, float) or not 0 < reserve < plan["max_seconds"]:
@@ -80,6 +80,11 @@ def _load(root):
         if sha256(root / context["path"]) != context["sha256"]:
             raise ValueError("Delivered knowledge context changed")
     decisions = state.get("decisions", [])
+    if state.get("diagnostics"):
+        from .diagnostics import verify
+
+        for diagnostic in state["diagnostics"]:
+            verify(root, diagnostic)
     for reference in decisions:
         if sha256(root / reference["path"]) != reference["sha256"]:
             raise ValueError("Retained experiment decision changed")
@@ -142,7 +147,7 @@ def status(root: Path) -> dict:
         from .experiment_decisions import template
 
         decision_template = template(state["best"]["sha256"])
-    return {
+    result = {
         "session": str(root), "state": state["state"], "next_action": next_action,
         "completed_rounds": len(state["rounds"]), "round_limit": plan["round_limit"],
         "remaining_seconds": max(0, state["deadline"] - time.time()),
@@ -162,6 +167,12 @@ def status(root: Path) -> dict:
         "latest_observation": state["rounds"][-1] if state["rounds"] else None,
         "summary": str(root / "summary.json") if state["final"] is not None else None,
     }
+    if plan.get("decision_policy") == "efficient":
+        from .experiment_efficiency import brief, context
+
+        result["search_context"] = context(root, plan, state)
+        result["latest_observation"] = brief(state["rounds"][-1]) if state["rounds"] else None
+    return result
 
 
 def _active(state, *, reserve=0):
@@ -199,6 +210,44 @@ def _usage_record(source):
     return ({"usage": usage, "tool_calls": None,
              "usage_source": {"kind": "caller_export", "sha256": hashlib.sha256(raw).hexdigest()}},
             raw)
+
+
+def reuse_context(root: Path, reference: str) -> dict:
+    """Explicit reuse of pinned delivered bytes, never a cache of a mutable query."""
+    with _locked(root):
+        plan, state = _load(root)
+        _active(state, reserve=plan["final_reserve_seconds"])
+        if plan.get("knowledge_allowed") is False:
+            raise ValueError("Knowledge delivery is disabled by the frozen condition")
+        retained = next((item for item in state["contexts"] if item["path"] == reference), None)
+        if retained is None:
+            raise ValueError("Reuse requires a context path retained by this campaign")
+        state.setdefault("context_reuses", []).append({"reference": retained, "at": time.time()})
+        atomic_write_json(root / "state.json", state)
+        return {"reference": retained, "reused": True,
+                "context": json.loads((root / reference).read_text(encoding="utf-8"))}
+
+
+def run_diagnostic(root: Path, *, execute, **request) -> dict:
+    from .diagnostics import prepare
+
+    with _locked(root):
+        plan, state = _load(root)
+        _active(state, reserve=plan["final_reserve_seconds"])
+        if len(state["rounds"]) >= plan["round_limit"]:
+            raise ValueError("Round budget consumed; finalize without new diagnostics")
+        pending = prepare(root, plan, state, **request)
+        state["pending"] = pending
+        atomic_write_json(root / "state.json", state)
+        directory = root / pending["path"]
+        try:
+            execution = execute(root, directory, plan, pending)
+        except Exception as error:
+            # Keep pending so recovery only collects a real receipt, never reruns.
+            atomic_write_json(directory / "coordinator-error.json", {
+                "type": type(error).__name__, "error": str(error)})
+            raise
+        return _settle(root, plan, state, pending, execution, None)
 
 
 def register_decision(root: Path, source: Path) -> dict:
@@ -256,6 +305,8 @@ def _summary(root, plan, state):
         "session_usage_export": final.get("observations") if final else None,
         "knowledge_deliveries": state["contexts"],
         "experiment_decisions": state.get("decisions", []),
+        "diagnostics": state.get("diagnostics", []),
+        "context_reuses": state.get("context_reuses", []),
         "curve": [
             {"round": index + 1, "hypothesis": item["hypothesis"],
              "decision": item.get("decision"),
@@ -274,6 +325,25 @@ def _failure(error):
 
 def _settle(root, plan, state, pending, execution, assess):
     directory = root / pending["path"]
+    if pending["kind"] == "diagnostic":
+        from .diagnostics import settle
+
+        try:
+            _load(root)
+            record = settle(root, plan, pending, execution)
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            state.update(state="blocked", integrity_error=str(error))
+            atomic_write_json(root / "state.json", state)
+            return status(root)
+        state.setdefault("diagnostics", []).append(record)
+        state["pending"] = None
+        if not record["execution_settled"]:
+            state.update(state="blocked", settled_at=time.time())
+        atomic_write_json(root / "state.json", state)
+        atomic_write_json(root / "summary.json", _summary(root, plan, state))
+        result = status(root)
+        result["diagnostic"] = record
+        return result
     # Re-check integrity before accepting a score. Drift is terminal, but must
     # leave a recorded rejection rather than an attempt permanently in pending.
     try:

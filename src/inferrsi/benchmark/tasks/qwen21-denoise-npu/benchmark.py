@@ -21,7 +21,25 @@ class OutputValidationError(ValueError):
 
 
 class CandidateContractError(ValueError):
-    """The candidate could not satisfy the Python entry contract before execution."""
+    """The candidate violated a known Python or operator argument contract."""
+
+
+def invoke_compute(function, inputs, params, config, *, candidate):
+    """Attribute explicit invocation errors without hiding unknown device failures."""
+    try:
+        return function(*inputs, params, config=config)
+    except (TypeError, ValueError, IndexError, KeyError, AttributeError, NameError) as error:
+        if not candidate:
+            raise
+        raise CandidateContractError(f"{type(error).__name__}: {error}") from error
+    except RuntimeError as error:
+        # CANN reports a rejected FlashAttention mask as RuntimeError. Require
+        # the concrete argument diagnostic, not the generic ACL/tiling error.
+        message = str(error)
+        if (candidate and "npu_fusion_attention" in message
+                and "get unsupported atten_mask shape" in message):
+            raise CandidateContractError(message) from error
+        raise
 
 
 def candidate_function(path):
@@ -122,7 +140,8 @@ def run(args, output, record):
         ]
         synchronize()
         started = time.perf_counter_ns()
-        result = functions[label](*inputs, params, config=config)
+        result = invoke_compute(functions[label], inputs, params, config,
+                                candidate=label == "candidate")
         synchronize()
         elapsed = (time.perf_counter_ns() - started) / 1e6
         shape = (inputs[3].numel() - 1, *inputs[0].shape)
