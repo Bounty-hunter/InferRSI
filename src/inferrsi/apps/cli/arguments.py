@@ -71,7 +71,7 @@ def _optimization_actions(stages, *, project=False):
     else:
         start.add_argument("task")
         start.add_argument("--evaluation-args", required=True)
-        start.set_defaults(round_mode="exact")
+        start.add_argument("--round-mode", choices=("exact", "up_to"), default="exact")
     start.add_argument("--session", "--directory", dest="session", type=Path, required=True)
     start.add_argument("--rounds", type=int, required=True)
     start.add_argument("--max-minutes", type=float, required=True)
@@ -82,13 +82,23 @@ def _optimization_actions(stages, *, project=False):
     start.add_argument("--knowledge", choices=("on", "off"), default="on")
     start.add_argument("--evaluation-prefix", default="", help="Quoted allocator argv prefix")
     start.add_argument("--python", default=sys.executable)
-    for name in ("status", "round", "final", "recover", "knowledge"):
+    start.add_argument("--selection-policy", choices=("agent", "framework"), default="agent")
+    start.add_argument("--stall-limit", type=int)
+    start.add_argument("--action-seconds", type=float)
+    start.add_argument("--exploration-seconds", type=float)
+    for name in ("status", "round", "final", "recover", "knowledge", "propose", "select"):
         stage = stages.add_parser(name)
         stage.set_defaults(session_action=name)
         stage.add_argument("--session", "--directory", dest="session", type=Path, required=True)
         if name == "round":
             stage.add_argument("--candidate", type=Path, required=True)
             stage.add_argument("--hypothesis", required=True)
+            stage.add_argument("--decision-id")
+        if name == "propose":
+            stage.add_argument("--input", type=Path, required=True, help="Proposal pool JSON")
+        if name == "select":
+            stage.add_argument("--proposal-id")
+            stage.add_argument("--explore-reason")
         if name == "final":
             stage.add_argument("--reason", help="Why the caller stopped an up-to-budget search")
         if name in ("round", "final"):

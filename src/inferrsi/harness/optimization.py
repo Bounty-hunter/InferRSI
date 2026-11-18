@@ -44,6 +44,10 @@ def initialize(root: Path, plan: dict) -> dict:
                  "sha256": plan["baseline_sha256"],
                  "score": plan["selection"]["initial_score"], "kind": "baseline"},
     }
+    if plan.get("search_policy", {}).get("name") == "framework":
+        state["search"] = {"pool": [], "pool_basis": None, "receipts": [],
+                           "active": None, "exploration_reserved_seconds": 0,
+                           "abandoned": []}
     atomic_write_json(root / "campaign.json", {
         "campaign_id": root.name, "managed_optimization": True,
         "plan_digest": digest(plan), "task": plan["task"],
@@ -79,6 +83,19 @@ def _load(root):
     for context in state["contexts"]:
         if sha256(root / context["path"]) != context["sha256"]:
             raise ValueError("Delivered knowledge context changed")
+    for receipt in state.get("search", {}).get("receipts", []):
+        if sha256(root / receipt["path"]) != receipt["sha256"]:
+            raise ValueError("Retained search-policy receipt changed")
+    search = state.get("search")
+    if search and search["pool_basis"] is not None:
+        pools = [r for r in search["receipts"] if r["path"].startswith("search/pool-")]
+        retained_pool = json.loads((root / pools[-1]["path"]).read_text(encoding="utf-8"))
+        if retained_pool != {"basis_sha256": search["pool_basis"], "proposals": search["pool"]}:
+            raise ValueError("Search pool disagrees with its retained receipt")
+    if search and search["active"]:
+        if not any(json.loads((root / r["path"]).read_text(encoding="utf-8")) == search["active"]
+                   for r in search["receipts"] if r["path"].startswith("search/decision-")):
+            raise ValueError("Active search decision disagrees with its retained receipt")
     for record in [*state["rounds"], *([state["final"]] if state["final"] else [])]:
         directory = root / record["path"]
         if sha256(directory / "observation.json") != record["observation_sha256"]:
@@ -119,7 +136,7 @@ def status(root: Path) -> dict:
         next_action = "recover_existing_attempt_without_relaunch"
     if state["state"] in ("completed", "blocked"):
         next_action = state["state"]
-    return {
+    view = {
         "session": str(root), "state": state["state"], "next_action": next_action,
         "completed_rounds": len(state["rounds"]), "round_limit": plan["round_limit"],
         "remaining_seconds": max(0, state["deadline"] - time.time()),
@@ -135,6 +152,15 @@ def status(root: Path) -> dict:
         "latest_observation": state["rounds"][-1] if state["rounds"] else None,
         "summary": str(root / "summary.json") if state["final"] is not None else None,
     }
+    if "search" in state:
+        view["search"] = _search_view(root, plan, state)
+        if (state["state"] == "active" and state["pending"] is None and search_remaining > 0
+                and len(state["rounds"]) < plan["round_limit"]):
+            if not view["search"]["pool_current"]:
+                view["next_action"] = "register_current_proposals_before_editing"
+            elif state["search"]["active"] is None:
+                view["next_action"] = "select_framework_action"
+    return view
 
 
 def _active(state, *, reserve=0):
@@ -142,6 +168,123 @@ def _active(state, *, reserve=0):
         raise ValueError("Session is complete, blocked or has an unresolved attempt")
     if time.time() >= state["deadline"] - reserve:
         raise ValueError("Optimization deadline exhausted, final evaluation is incomplete")
+
+
+def _search_view(root, plan, state):
+    from . import search_policy
+
+    search = state["search"]
+    current = search["pool_basis"] == state["best"]["sha256"]
+    ranked = search_policy.rank(search["pool"], search_policy.source_facts(
+        root / state["best"]["path"]), state["rounds"], plan["search_policy"]) if current else []
+    return {"policy": plan["search_policy"], "pool_current": current,
+            "ranked": ranked, "active": search["active"],
+            "exploration_remaining_seconds": max(0, plan["search_policy"][
+                "exploration_seconds"] - search["exploration_reserved_seconds"]),
+            "interpretation": "Static source repetition and declared mechanisms are heuristics, "
+                              "not predicted whole-task gains or feasibility proofs."}
+
+
+def _search_receipt(root, state, kind, document):
+    relative = f"search/{kind}-{uuid.uuid4().hex}.json"
+    path = root / relative
+    path.parent.mkdir(exist_ok=True)
+    atomic_write_json(path, document)
+    state["search"]["receipts"].append({"path": relative, "sha256": sha256(path)})
+
+
+def propose(root, payload):
+    from . import search_policy
+
+    with _locked(root):
+        plan, state = _load(root)
+        _active(state, reserve=plan["final_reserve_seconds"])
+        if "search" not in state:
+            raise ValueError("The frozen session does not enable framework selection")
+        if len(state["rounds"]) >= plan["round_limit"]:
+            raise ValueError("Round budget consumed, run independent final evaluation")
+        pool = search_policy.validate_pool(payload, state["best"]["sha256"])
+        search = state["search"]
+        if search["active"]:
+            previous = search["active"]
+            search["abandoned"].append({"decision_id": previous["decision_id"],
+                "reason": "proposal_pool_replaced", "action_elapsed_seconds":
+                max(0, time.time() - previous["issued_at"])})
+        _search_receipt(root, state, "pool", payload)
+        search.update(pool=pool, pool_basis=payload["basis_sha256"], active=None)
+        atomic_write_json(root / "state.json", state)
+        return status(root)
+
+
+def select(root, *, proposal_id=None, explore_reason=None):
+    with _locked(root):
+        plan, state = _load(root)
+        _active(state, reserve=plan["final_reserve_seconds"])
+        if "search" not in state:
+            raise ValueError("The frozen session does not enable framework selection")
+        if len(state["rounds"]) >= plan["round_limit"]:
+            raise ValueError("Round budget consumed, run independent final evaluation")
+        search = state["search"]
+        if search["active"]:
+            if proposal_id or explore_reason:
+                raise ValueError("Replace the proposal pool to explicitly abandon an active action")
+            return status(root)  # repeated select cannot reset a deadline or grant more credit
+        view = _search_view(root, plan, state)
+        if not view["pool_current"] or not view["ranked"]:
+            raise ValueError("Register proposals based on the retained current best")
+        available = [row for row in view["ranked"] if not row["deferred"]]
+        chosen = next((row for row in view["ranked"] if row["proposal"]["id"] == proposal_id),
+                      None) if proposal_id else (available[0] if available else None)
+        if chosen is None:
+            if proposal_id:
+                raise ValueError("Requested proposal is not in the current pool")
+            result = status(root)
+            result["next_action"] = "final_or_explicit_bounded_exploration"
+            return result
+        override = chosen["deferred"] or (available and chosen is not available[0])
+        reason = (explore_reason or "").strip()
+        if override and not reason:
+            raise ValueError("A nonselected/deferred proposal requires --explore-reason")
+        if explore_reason is not None and (not reason or len(reason) > 4096):
+            raise ValueError("Exploration requires a bounded nonempty reason")
+        allowance = min(plan["search_policy"]["action_seconds"],
+                        state["deadline"] - time.time() - plan["final_reserve_seconds"])
+        if reason:
+            remaining = view["exploration_remaining_seconds"]
+            if remaining <= 0:
+                raise ValueError("The frozen exploration budget is exhausted")
+            allowance = min(allowance, remaining)
+            search["exploration_reserved_seconds"] += allowance
+        now = time.time()
+        decision = {"decision_id": uuid.uuid4().hex, "basis_sha256": state["best"]["sha256"],
+                    "proposal": chosen["proposal"], "target_sha256": chosen["target_sha256"],
+                    "signals": chosen["signals"], "reasons": chosen["reasons"],
+                    "explore_reason": reason or None, "issued_at": now,
+                    "deadline": min(state["deadline"] - plan["final_reserve_seconds"],
+                                    now + allowance), "budget_seconds": allowance,
+                    "action": "implement"}
+        _search_receipt(root, state, "decision", decision)
+        search["active"] = decision
+        atomic_write_json(root / "state.json", state)
+        return status(root)
+
+
+def _authorize_search(plan, state, decision_id, fingerprint):
+    if "search" not in state:
+        if decision_id:
+            raise ValueError("Agent-policy sessions do not accept framework decision IDs")
+        return None
+    decision = state["search"]["active"]
+    if not decision or decision["decision_id"] != decision_id:
+        raise ValueError("A current framework selection decision is required before execution")
+    if decision["basis_sha256"] != state["best"]["sha256"]:
+        raise ValueError("Framework decision is based on a different retained best")
+    if time.time() >= decision["deadline"]:
+        raise ValueError("Framework action expired; retain the cost and register a new pool")
+    previous = [r for r in state["rounds"] if r["candidate_sha256"] == fingerprint]
+    if previous and not decision["explore_reason"]:
+        raise ValueError("Exact source repeat requires an explicit bounded exploration reason")
+    return dict(decision)
 
 
 def capture_context(root: Path, reader, *, retain_context, **request) -> dict:
@@ -183,7 +326,7 @@ def _token_totals(records):
 def _summary(root, plan, state):
     rounds = state["rounds"]
     final = state["final"]
-    return {
+    result = {
         "schema_version": 1, "task": plan["task"], "condition": plan["condition"],
         "state": state["state"], "planned_rounds": plan["round_limit"],
         "completed_rounds": len(rounds), "selected_candidate": state["best"],
@@ -208,6 +351,12 @@ def _summary(root, plan, state):
             for index, item in enumerate(rounds)
         ],
     }
+    if "search" in state:
+        result["search_policy"] = plan["search_policy"]
+        result["search_receipts"] = state["search"]["receipts"]
+        result["abandoned_search_actions"] = state["search"]["abandoned"]
+        result["exploration_reserved_seconds"] = state["search"]["exploration_reserved_seconds"]
+    return result
 
 
 def _type_name(error):
@@ -283,6 +432,12 @@ def _settle(root, plan, state, pending, execution, assess):
                              "path": pending["path"] + "/" + plan["candidate_name"],
                              "sha256": pending["candidate_sha256"], "score": score}
         record["best_after"] = dict(state["best"])
+        if pending.get("search_decision"):
+            record["promoted"] = state["best"].get("candidate_id") == pending["candidate_id"]
+            elapsed = max(0, time.time() - pending["search_decision"]["issued_at"])
+            record["search_decision"] = {**pending["search_decision"],
+                                         "action_elapsed_seconds": elapsed}
+            state["search"]["active"] = None
         state["rounds"].append(record)
     else:
         state["final"] = record
@@ -304,7 +459,8 @@ def _settle(root, plan, state, pending, execution, assess):
 
 
 def evaluate_round(root: Path, *, candidate: Path | None, hypothesis: str,
-                   usage: Path | None, execute, assess, final=False, reason=None) -> dict:
+                   usage: Path | None, execute, assess, final=False, reason=None,
+                   decision_id=None) -> dict:
     with _locked(root):
         plan, state = _load(root)
         _active(state, reserve=0 if final else plan["final_reserve_seconds"])
@@ -323,6 +479,8 @@ def evaluate_round(root: Path, *, candidate: Path | None, hypothesis: str,
                 and (not source.is_file() or source.suffix != ".py"))
                 or (plan["candidate_kind"] == "directory" and not source.is_dir())):
             raise ValueError("Candidate does not match the frozen input format")
+        fingerprint = candidates.identity(source, plan.get("candidate_includes"))
+        decision = None if final else _authorize_search(plan, state, decision_id, fingerprint)
         observations, usage_bytes = _usage_record(usage)
         parent = "final" if final else f"rounds/round-{count + 1:02d}"
         relative = parent + "/attempt-" + uuid.uuid4().hex
@@ -330,19 +488,25 @@ def evaluate_round(root: Path, *, candidate: Path | None, hypothesis: str,
         directory.mkdir(parents=True, exist_ok=False)
         if usage_bytes is not None:
             (directory / "agent-usage.json").write_bytes(usage_bytes)
-        fingerprint = candidates.retain(source, directory / plan["candidate_name"],
-                                        plan.get("candidate_includes"))
+        retained = candidates.retain(source, directory / plan["candidate_name"],
+                                     plan.get("candidate_includes"))
+        if retained != fingerprint:
+            raise ValueError("Candidate changed while retaining the authorized source")
         pending = {"kind": "final" if final else "round", "path": relative,
                    "candidate_id": state["best"].get("candidate_id", "baseline") if final
                    else f"candidate-{count + 1:03d}",
                    "hypothesis": hypothesis, "observations": observations,
                    "candidate_sha256": fingerprint,
                    "contexts": list(state["contexts"]), "started_at": time.time()}
+        if decision:
+            pending["search_decision"] = decision
         state["pending"] = pending
         if final:
             state["stop_reason"] = reason or "fixed_round_budget_completed"
         atomic_write_json(root / "state.json", state)
         deadline = state["deadline"] - (0 if final else plan["final_reserve_seconds"])
+        if decision:
+            deadline = min(deadline, decision["deadline"])
         try:
             execution = execute(root, directory, plan, deadline)
         except Exception as error:

@@ -148,6 +148,54 @@ state and renders the objective and cumulative observed-token curves. Missing
 usage remains unknown. Final acceptance is displayed separately from search
 rounds; reopening a completed campaign does not increase its recorded duration.
 
+## Optional framework selection
+
+The default `--selection-policy agent` preserves direct submissions. To enable
+framework allocation, start with `--selection-policy framework` and explicitly
+supply `--stall-limit`, `--action-seconds`, and `--exploration-seconds`. These
+campaign parameters are frozen in the plan. Packaged tasks also accept
+`--round-mode up_to`; stopping still requires a reason and independent final.
+The same operations are available on ordinary `campaign` sessions.
+
+Before editing, submit `propose --session <session> --input <pool.json>`. The JSON
+contains `basis_sha256` (the current retained best) and `proposals`. Each proposal
+has `id`, `family`, `target`, `kind`, and `hypothesis`. Supported kinds are
+`eliminate_work`, `fuse`, `replace`, `tune`, and `repair`; a target is a Python
+function name, or `relative.py::name` for project inputs. Use distinct, honest
+mechanisms when useful; the pool does not require invented alternatives.
+
+`select --session <session>` ranks proposals lexicographically by deferral,
+mechanism tier, prior family attempts, observed median action cost (or frozen
+action allowance when unknown), static repetition depth, and ID. Removal of work
+in a repeated source scope precedes fusion/replacement there, then other actions.
+This is an explicit heuristic, not a trained hardness predictor. Static call/loop
+structure and Agent-declared kinds cannot establish runtime frequency, latency
+headroom, numerical correctness, or feasibility; unknown targets remain eligible.
+Successive nonpromotions within the same family, target, and target AST identity
+soft-defer that action at the frozen stall limit. A promotion or changed target
+invalidates that local inference. Infrastructure failures are not negative evidence.
+
+Selection returns an immutable receipt and single-use `decision_id`. Restore the
+returned best basis, implement the selected proposal, and submit `round` with
+`--decision-id <id>` before its deadline. Missing, stale, or expired decisions
+cannot execute. Repeated `select` returns the existing action without renewing
+its time allowance. Replacing the pool explicitly abandons an active action and
+retains its elapsed cost. Ordinary round/time/final-reserve constraints still apply.
+
+To bypass soft ranking/deferral, use `select --proposal-id <id> --explore-reason
+'<evidence or uncertainty>'`. Exploration conservatively reserves the full action
+allowance from the frozen exploration budget; abandoned actions do not refund it.
+Exact repeated source bytes also require explicit exploration. Final always
+retests the retained best independently and requires no search decision.
+
+Receipts, signals, action costs and exploration reservations are retained beside
+the normal observations. This enforcement governs managed submissions. It cannot
+verify semantic correspondence between declared mechanisms and arbitrary code,
+or prevent external shell work. Optional diagnostics are external in this version;
+they must be recorded in the experiment's full wall-time/usage ledger and never
+replace the full quality/measurement protocol. No runtime capability blacklist
+or numeric gain estimator is inferred from diagnostic stdout.
+
 ## Tokens and interruption recovery
 
 The current conversation's Agent runs outside the InferRSI process. Import

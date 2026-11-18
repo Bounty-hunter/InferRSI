@@ -70,6 +70,141 @@ def submit(root, factor, capsys, usage=None):
     return json.loads(capsys.readouterr().out)
 
 
+@pytest.fixture
+def framework_session(tmp_path, task, capsys):
+    root = tmp_path / "framework"
+    assert main([
+        "benchmarks", "session", "start", task.name, "--session", str(root),
+        "--rounds", "4", "--round-mode", "up_to", "--max-minutes", "5",
+        "--evaluation-timeout-seconds", "15", "--condition", "framework-test",
+        "--evaluation-args", "", "--selection-policy", "framework", "--stall-limit", "1",
+        "--action-seconds", "30", "--exploration-seconds", "30",
+    ]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["next_action"] == "register_current_proposals_before_editing"
+    return root
+
+
+def framework_pool(root, capsys, proposals=None):
+    from inferrsi.harness import optimization
+
+    view = optimization.status(root)
+    payload = {"basis_sha256": view["best"]["sha256"], "proposals": proposals or [
+        {"id": "a", "family": "alpha", "target": "unknown", "kind": "tune",
+         "hypothesis": "Synthetic alpha"},
+        {"id": "b", "family": "beta", "target": "unknown", "kind": "replace",
+         "hypothesis": "Synthetic beta"},
+    ]}
+    path = root / "proposals.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert main(["benchmarks", "session", "propose", "--session", str(root),
+                 "--input", str(path)]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def framework_select(root, capsys, *extra):
+    assert main(["benchmarks", "session", "select", "--session", str(root), *extra]) == 0
+    return json.loads(capsys.readouterr().out)["search"]["active"]
+
+
+def framework_round(root, capsys, decision, factor):
+    candidate = root / "work/candidate.py"
+    candidate.write_text(f"FACTOR = {factor}\n", encoding="utf-8")
+    assert main(["benchmarks", "session", "round", "--session", str(root),
+                 "--candidate", str(candidate), "--hypothesis", "Selected test",
+                 "--decision-id", decision["decision_id"]]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_framework_controls_real_execution_and_final_after_rejection(framework_session, capsys):
+    root = framework_session
+    view = framework_pool(root, capsys)
+    assert view["search"]["ranked"][0]["signals"]["predicted_gain"] is None
+    candidate = root / "work/candidate.py"
+    args = ["benchmarks", "session", "round", "--session", str(root),
+            "--candidate", str(candidate), "--hypothesis", "Unauthorized"]
+    with pytest.raises(SystemExit):
+        main(args)
+    capsys.readouterr()
+    assert not (root / "calls.log").exists()
+    first = framework_select(root, capsys)
+    assert first["proposal"]["id"] == "a"
+    assert framework_select(root, capsys) == first  # no renewed deadline
+    with pytest.raises(SystemExit):
+        main([*args, "--decision-id", "wrong"])
+    capsys.readouterr()
+    framework_round(root, capsys, first, -1)
+    view = framework_pool(root, capsys)
+    assert view["search"]["ranked"][0]["proposal"]["id"] == "b"
+    assert view["search"]["ranked"][1]["deferred"]
+    # Failed candidate never replaces the baseline; final needs no decision.
+    assert main(["benchmarks", "session", "final", "--session", str(root),
+                 "--reason", "Candidates rejected; preserve best"]) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "completed"
+    assert (root / "calls.log").read_text().splitlines() == ["-1", "1"]
+
+
+def test_framework_repeat_and_exploration_budget(framework_session, capsys):
+    root = framework_session
+    framework_pool(root, capsys)
+    first = framework_select(root, capsys)
+    framework_round(root, capsys, first, 0.5)
+    framework_pool(root, capsys)
+    second = framework_select(root, capsys)
+    assert second["proposal"]["id"] == "b"
+    with pytest.raises(SystemExit):
+        framework_round(root, capsys, second, 0.5)
+    capsys.readouterr()
+    framework_pool(root, capsys)  # abandonment retains cost, does not refund credit
+    exploratory = framework_select(root, capsys, "--proposal-id", "a",
+                                   "--explore-reason", "Check a suspected noisy result")
+    assert exploratory["explore_reason"]
+    framework_round(root, capsys, exploratory, 0.5)
+    framework_pool(root, capsys)
+    with pytest.raises(SystemExit):
+        framework_select(root, capsys, "--proposal-id", "a", "--explore-reason", "Again")
+    capsys.readouterr()
+    assert (root / "calls.log").read_text().splitlines() == ["0.5", "0.5"]
+
+
+@pytest.mark.parametrize("change", ["receipt", "active", "source"])
+def test_framework_rejects_drift_before_execution(framework_session, capsys, change):
+    from inferrsi.harness import optimization
+
+    root = framework_session
+    framework_pool(root, capsys)
+    framework_select(root, capsys)
+    state = json.loads((root / "state.json").read_text())
+    if change == "receipt":
+        (root / state["search"]["receipts"][-1]["path"]).write_text("{}")
+    elif change == "active":
+        state["search"]["active"]["deadline"] += 1000
+        (root / "state.json").write_text(json.dumps(state))
+    else:
+        (root / state["best"]["path"]).write_text("FACTOR = 9\n")
+    with pytest.raises(ValueError, match="changed|disagrees"):
+        optimization.status(root)
+    assert not (root / "calls.log").exists()
+
+
+def test_framework_expiry_and_stale_basis(framework_session, capsys, monkeypatch):
+    from inferrsi.harness import optimization
+
+    root = framework_session
+    framework_pool(root, capsys)
+    decision = framework_select(root, capsys)
+    with monkeypatch.context() as clock:
+        clock.setattr(optimization.time, "time", lambda: decision["deadline"] + 1)
+        with pytest.raises(SystemExit):
+            framework_round(root, capsys, decision, 2)
+    capsys.readouterr()
+    framework_round(root, capsys, decision, 2)
+    with pytest.raises(ValueError, match="retained current best"):
+        optimization.propose(root, json.loads((root / "proposals.json").read_text()))
+    with pytest.raises(ValueError, match="Register proposals"):
+        optimization.select(root)
+
+
 def test_started_task_uses_frozen_protocol_without_registry(session, capsys, monkeypatch):
     def unavailable(*args):
         raise AssertionError("The running campaign must not rediscover its task")

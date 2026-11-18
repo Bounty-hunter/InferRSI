@@ -115,6 +115,7 @@ def _runtime_identity():
 
     root = Path(str(files("inferrsi")))
     names = ("harness/optimization_session.py", "harness/optimization.py",
+             "harness/search_policy.py",
              "harness/local_process.py",
              "infra/processes.py", "infra/artifacts.py", "harness/scenarios/external.py",
              "harness/atomic_json.py", "harness/artifact_primitives.py",
@@ -137,6 +138,7 @@ def session_command(args, *, task_source: Path | None = None, knowledge_reader=N
 
         from inferrsi.harness.artifact_primitives import sha256
         from inferrsi.harness.candidates import identity, retain
+        from inferrsi.harness.search_policy import configuration
         from inferrsi.harness.task_protocol import prepare
 
         if args.rounds < 1 or any(not math.isfinite(value) or value <= 0 for value in (
@@ -145,6 +147,9 @@ def session_command(args, *, task_source: Path | None = None, knowledge_reader=N
             raise ValueError("A positive round/time budget and condition label are required")
         if root.exists():
             raise ValueError("Session directory must be new")
+        search_policy = configuration(args.selection_policy, stall_limit=args.stall_limit,
+                                      action_seconds=args.action_seconds,
+                                      exploration_seconds=args.exploration_seconds)
         reserve = (args.final_reserve_seconds if args.final_reserve_seconds is not None
                    else args.evaluation_timeout_seconds)
         if not math.isfinite(reserve) or not 0 < reserve < args.max_minutes * 60:
@@ -190,6 +195,7 @@ def session_command(args, *, task_source: Path | None = None, knowledge_reader=N
                 "knowledge_allowed": args.knowledge == "on",
                 "evaluation_timeout_seconds": args.evaluation_timeout_seconds,
                 "evaluation_prefix": evaluation_prefix, "python": args.python,
+                "search_policy": search_policy,
                 "runtime_identity": _runtime_identity(), **candidate, **settings}
         result = optimization.initialize(root, plan)
         operation = "campaign" if args.project_task else "benchmarks session"
@@ -201,6 +207,10 @@ def session_command(args, *, task_source: Path | None = None, knowledge_reader=N
             f"Follow the frozen round policy, then run {operation} final to retest independently. "
             "Report summary.json and its curve. Import actual usage exports when available."
         )
+        if search_policy["name"] == "framework":
+            from inferrsi.harness.search_policy import guidance
+
+            result["instructions"] += " " + guidance()
         return result
     import json
 
@@ -209,6 +219,11 @@ def session_command(args, *, task_source: Path | None = None, knowledge_reader=N
         raise ValueError("Optimization runtime changed, use its frozen runtime to resume")
     if args.session_action == "status":
         return optimization.status(root)
+    if args.session_action == "propose":
+        return optimization.propose(root, json.loads(args.input.read_text(encoding="utf-8")))
+    if args.session_action == "select":
+        return optimization.select(root, proposal_id=args.proposal_id,
+                                   explore_reason=args.explore_reason)
     if args.session_action == "knowledge":
         if knowledge_reader is None or retain_context is None:
             raise ValueError("A knowledge reader and capture callback are required")
@@ -225,6 +240,7 @@ def session_command(args, *, task_source: Path | None = None, knowledge_reader=N
         hypothesis="Independent final of the selected candidate" if final else args.hypothesis,
         usage=args.usage_export, execute=_session_execute, assess=_session_assess, final=final,
         reason=getattr(args, "reason", None),
+        decision_id=getattr(args, "decision_id", None),
     )
 
 
