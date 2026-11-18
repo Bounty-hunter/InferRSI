@@ -150,6 +150,10 @@ rounds; reopening a completed campaign does not increase its recorded duration.
 
 ## Optional framework selection
 
+Framework selection is experimental and opt-in. Correct control and retained
+decisions do not establish improved optimization efficiency; validate search
+outcomes and complete costs against independent Agent trajectories.
+
 The default `--selection-policy agent` preserves direct submissions. To enable
 framework allocation, start with `--selection-policy framework` and explicitly
 supply `--stall-limit`, `--action-seconds`, and `--exploration-seconds`. These
