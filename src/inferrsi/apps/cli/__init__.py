@@ -356,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
                 _print(compare_command(args))
                 return 0
             if args.benchmark_action == "session":
+                from ...benchmark.summary import POLICY
                 from ...harness.optimization_session import session_command
                 from ..delivery import after_final
 
@@ -366,6 +367,7 @@ def main(argv: list[str] | None = None) -> int:
                     task_source = Path(str(task_resources(args.task)))
                 result = session_command(
                     args, task_source=task_source,
+                    report_metadata={"benchmark_metrics": POLICY},
                     retain_context=capture_context,
                     knowledge_reader=(KnowledgeReader()
                                       if args.session_action == "knowledge" else None),
